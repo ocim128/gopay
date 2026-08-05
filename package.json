@@ -1,0 +1,48 @@
+{
+  "name": "gopay-merchant",
+  "version": "2.0.0",
+  "description": "Self-hosted QRIS payment-gateway middleware on top of a GoPay Merchant (GoBiz) account: create dynamic QRIS, auto-detect settlement, and deliver signed webhooks (paid/expired).",
+  "type": "module",
+  "main": "src/server.js",
+  "keywords": [
+    "gopay",
+    "gobiz",
+    "gojek",
+    "qris",
+    "payment-gateway",
+    "webhook",
+    "merchant",
+    "self-hosted",
+    "indonesia"
+  ],
+  "author": "aditamagf",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aditamagf/gopay-merchant.git"
+  },
+  "homepage": "https://github.com/aditamagf/gopay-merchant#readme",
+  "bugs": {
+    "url": "https://github.com/aditamagf/gopay-merchant/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "vitest --run",
+    "lint:lang": "node scripts/lint-language.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "crc": "^4.3.2",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "moment-timezone": "^0.6.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "fast-check": "^4.8.0",
+    "vitest": "^4.1.9"
+  }
+}

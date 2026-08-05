@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+@theme {
+  --breakpoint-xs: 360px;
+
+  --font-sans: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --color-brand-50: #eef8ff;
+  --color-brand-100: #d8eeff;
+  --color-brand-200: #b6e0ff;
+  --color-brand-300: #84ccff;
+  --color-brand-400: #48b1f8;
+  --color-brand-500: #1c95ec;
+  --color-brand-600: #0a78d2;
+  --color-brand-700: #0a60aa;
+  --color-brand-800: #0d508b;
+  --color-brand-900: #114473;
+  --color-brand-950: #0b2b4d;
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 30px -16px rgba(15, 23, 42, 0.18);
+  --shadow-card-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 18px 40px -18px rgba(15, 23, 42, 0.28);
+  --shadow-brand: 0 10px 24px -10px rgba(28, 149, 236, 0.55);
+
+  --radius-2xl: 1.125rem;
+  --radius-3xl: 1.5rem;
+}
+
+/*
+ * Keep the layout functional and free of horizontal scroll across the supported
+ * viewport range of 360px to 1920px (Requirement 13.9).
+ */
+html,
+body {
+  min-width: 320px;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+  font-feature-settings: 'cv05', 'ss01';
+}
+
+@utility gp-card {
+  @apply rounded-2xl border border-slate-100 bg-white shadow-card;
+}
+
+@utility gp-card-pad {
+  @apply p-5 sm:p-6;
+}
+
+@utility gp-input {
+  @apply h-[42px] w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:ring-0;
+}
+
+@utility gp-label {
+  @apply block text-sm font-semibold text-slate-700;
+}
+
+@utility gp-hint {
+  @apply text-xs text-slate-500;
+}
+
+@utility gp-btn {
+  @apply h-[42px] inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-brand-200 disabled:cursor-not-allowed disabled:opacity-60;
+}
+
+@utility gp-btn-primary {
+  @apply gp-btn bg-gradient-to-br from-brand-400 to-brand-600 text-white shadow-brand hover:from-brand-500 hover:to-brand-700;
+}
+
+@utility gp-btn-ghost {
+  @apply gp-btn border border-slate-200 bg-white text-slate-700 hover:bg-slate-50;
+}
+
+@utility gp-badge {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+
+/* Status chip: a badge rendered in uppercase with subtle letter-spacing. The
+   DOM text stays as the raw status; the uppercasing is purely visual. */
+@utility gp-status {
+  @apply gp-badge text-[11px] font-bold uppercase tracking-wide;
+}
+
+/* Sidebar navigation link states. */
+@utility gp-nav-link {
+  @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900;
+}
+
+@utility gp-nav-link-active {
+  @apply bg-brand-50 text-brand-700 hover:bg-brand-50 hover:text-brand-700;
+}
+
+/* Badge utilities for docs and code blocks */
+@utility badge-param {
+  @apply rounded-md bg-purple-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-purple-700 ring-1 ring-inset ring-purple-500/10;
+}
+@utility badge-header {
+  @apply rounded-md bg-orange-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-orange-700 ring-1 ring-inset ring-orange-500/10;
+}
+@utility badge-error {
+  @apply rounded-md bg-red-50 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-red-700 ring-1 ring-inset ring-red-500/10;
+}
+@utility badge-route {
+  @apply rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-500/10;
+}
+@utility badge-value {
+  @apply rounded-md bg-blue-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-blue-700 ring-1 ring-inset ring-blue-500/10;
+}
+@utility badge-method-post {
+  @apply rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700;
+}
+@utility badge-method-get {
+  @apply rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-brand-100 text-brand-700;
+}
