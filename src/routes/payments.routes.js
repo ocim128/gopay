@@ -32,7 +32,7 @@
 // The request schema leaves `additionalProperties`
 // enabled and the handler simply never reads it.
 
-import { buildHttpError, getErrorDefinition } from '../errors.js';
+import { buildHttpError, getErrorDefinition, createErrorHandler } from '../errors.js';
 import { createApiKeyAuthPreHandler } from '../auth/api-key-auth.js';
 import { generateQrisImage as defaultGenerateQrisImage } from '../payment/qris-builder.js';
 import { paymentRouteSchemas, getPaymentParamsSchema, WEBHOOK_URL_MAX_LENGTH } from './schemas.js';
@@ -211,25 +211,10 @@ export default async function paymentsRoutes(fastify, opts = {}) {
   }
 
   // Translate Fastify schema-validation failures into the consistent
-  // INVALID_REQUEST response. Any other error that bubbles
-  // up here is treated as an internal error.
-  fastify.setErrorHandler((error, request, reply) => {
-    if (error?.validation) {
-      const { http, body } = buildHttpError('INVALID_REQUEST');
-      return reply.code(http).send(body);
-    }
-    if (typeof error?.code === 'string') {
-      try {
-        getErrorDefinition(error.code);
-        const { http, body } = buildHttpError(error.code, error.message);
-        return reply.code(http).send(body);
-      } catch {
-        // Not a known domain code; fall through to a generic 500.
-      }
-    }
-    request.log?.error?.(error);
-    return reply.code(500).send({ error_code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' });
-  });
+  // INVALID_REQUEST response. Any other error that bubbles up here is treated as
+  // an internal error. Shares the canonical handler with the root server and the
+  // admin routes (see errors.js).
+  fastify.setErrorHandler(createErrorHandler());
 
   // ── POST /payment ────────────────────────────────────────────────────────
   // Create a Payment. Responds 201 with exactly
@@ -364,6 +349,10 @@ export default async function paymentsRoutes(fastify, opts = {}) {
     }
 
     const png = await generateImage(payment.qris_string);
+    // The QRIS string (and thus the PNG) is immutable for the life of the
+    // payment, so the image can be cached aggressively by every layer. Browsers
+    // and CDNs that re-request it get a 304 / cache hit instead of re-rendering.
+    reply.header('Cache-Control', 'private, max-age=300, immutable');
     return reply.code(200).type('image/png').send(png);
   });
 }

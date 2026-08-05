@@ -49,6 +49,15 @@ export const DEFAULT_MIN_INTERVAL_MS = 1000;
 export const DEFAULT_POLL_INTERVAL_MS = 5000;
 
 /**
+ * Default minimum spacing between `onMaintenance` invocations: once per 24
+ * hours. The maintenance hook (webhook-log pruning, etc.) rides the poll tick,
+ * so this constant bounds how often it actually fires.
+ *
+ * @type {number}
+ */
+export const DEFAULT_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Clamp `value` into the inclusive `[min, max]` range.
  *
  * @param {number} value
@@ -100,6 +109,15 @@ export class SharedPoller {
    *   so fake timers are honoured).
    * @param {(handle: any) => void} [deps.clearTimeoutFn] - injectable timer
    *   canceller; defaults to the global `clearTimeout`.
+   * @param {() => void} [deps.onMaintenance] - optional callback invoked at most
+   *   once every {@link deps.maintenanceIntervalMs} from inside the poll tick.
+   *   Used for periodic housekeeping (e.g. pruning old webhook delivery logs)
+   *   that should ride the existing loop rather than schedule its own timer.
+   *   A throw is caught and logged so it can never kill the loop.
+   * @param {number} [deps.maintenanceIntervalMs] - minimum spacing between
+   *   `onMaintenance` invocations in ms (default {@link DEFAULT_MAINTENANCE_INTERVAL_MS}).
+   * @param {() => number} [deps.now] - clock returning epoch ms, used to gate
+   *   maintenance; defaults to `Date.now`.
    * @param {Pick<Console, 'log' | 'warn' | 'error'>} [deps.logger] - logger.
    */
   constructor(gobizClient, deps = {}) {
@@ -109,7 +127,7 @@ export class SharedPoller {
       );
     }
     if (typeof deps.getActiveCount !== 'function') {
-      throw new TypeError('SharedPoller requires a getActiveCount() function.');
+      throw new TypeError('SharedPoller requires a getActiveCount function.');
     }
     if (typeof deps.onTransactions !== 'function') {
       throw new TypeError('SharedPoller requires an onTransactions() callback.');
@@ -140,6 +158,15 @@ export class SharedPoller {
         : (handle) => globalThis.clearTimeout(handle);
 
     this.logger = deps.logger ?? console;
+
+    /** Optional periodic-maintenance hook (e.g. webhook-log pruning). */
+    this.onMaintenance = typeof deps.onMaintenance === 'function' ? deps.onMaintenance : null;
+    this.maintenanceIntervalMs = Number.isFinite(deps.maintenanceIntervalMs)
+      ? deps.maintenanceIntervalMs
+      : DEFAULT_MAINTENANCE_INTERVAL_MS;
+    this._now = typeof deps.now === 'function' ? deps.now : () => Date.now();
+    /** @type {number} epoch ms of the last onMaintenance run, or 0 when never. */
+    this._lastMaintenanceAt = 0;
 
     /** @type {number} the configured base interval, never below minInterval. */
     this._baseInterval = this._readConfiguredInterval();
@@ -276,6 +303,11 @@ export class SharedPoller {
     // an explicit setInterval push (an additional safety net).
     this._baseInterval = this._readConfiguredInterval();
 
+    // Run periodic maintenance (webhook-log pruning, etc.) before the active-
+    // count check so it still fires on a system that is briefly idle — the
+    // hook gates itself on maintenanceIntervalMs and swallows its own errors.
+    this._runMaintenanceIfDue();
+
     const activeCount = this._safeActiveCount();
     if (activeCount <= 0) {
       // No Active_Payment: stop polling.
@@ -394,6 +426,33 @@ export class SharedPoller {
         `[SharedPoller] Failed to read the active payment count: ${err?.message ?? err}`,
       );
       return 0;
+    }
+  }
+
+  /**
+   * Invoke the {@link onMaintenance} hook when at least
+   * {@link maintenanceIntervalMs} has elapsed since the last run. A throw is
+   * caught and logged so housekeeping can never kill the poll loop. No-op when
+   * no hook was injected or the spacing has not yet elapsed.
+   *
+   * @returns {void}
+   * @private
+   */
+  _runMaintenanceIfDue() {
+    if (this.onMaintenance === null) {
+      return;
+    }
+    const now = this._now();
+    if (now - this._lastMaintenanceAt < this.maintenanceIntervalMs) {
+      return;
+    }
+    this._lastMaintenanceAt = now;
+    try {
+      this.onMaintenance();
+    } catch (err) {
+      this.logger?.error?.(
+        `[SharedPoller] onMaintenance hook threw: ${err?.message ?? err}`,
+      );
     }
   }
 }

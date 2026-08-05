@@ -38,11 +38,11 @@
     "crc": "^4.3.2",
     "dotenv": "^17.4.2",
     "fastify": "^5.11.2",
-    "moment-timezone": "^0.6.2",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "fast-check": "^4.8.0",
+    "moment-timezone": "^0.6.2",
     "vitest": "^4.1.9"
   }
 }

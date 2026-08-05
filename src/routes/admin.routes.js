@@ -55,7 +55,7 @@ import {
   validateStaticQrisValue,
   validateDisplayTimezone,
 } from '../config/runtime-config.js';
-import moment from 'moment-timezone';
+import { wallClockToEpochMs } from '../time.js';
 
 /**
  * Map an Admin_Auth login failure code to an HTTP status. Empty fields are a
@@ -506,9 +506,16 @@ export default async function adminRoutes(fastify, opts = {}) {
         let date = undefined;
         const dateStr = request.query?.date;
         if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          // Parse the YYYY-MM-DD wall-clock in the display timezone and produce
+          // a [start-of-day, start-of-next-day) epoch-ms range, honouring the
+          // zone's offset (and DST) for that date.
           const tz = configService.getDisplayTimezone();
-          const start = moment.tz(dateStr, tz).startOf('day').valueOf();
-          const end = moment.tz(dateStr, tz).add(1, 'day').startOf('day').valueOf();
+          const [yStr, mStr, dStr] = dateStr.split('-');
+          const y = Number(yStr);
+          const mo = Number(mStr);
+          const d = Number(dStr);
+          const start = wallClockToEpochMs(y, mo, d, 0, 0, 0, tz);
+          const end = wallClockToEpochMs(y, mo, d + 1, 0, 0, 0, tz);
           date = { start, end };
         }
 
@@ -640,8 +647,17 @@ export default async function adminRoutes(fastify, opts = {}) {
             // ignored
           }
         };
-        request.raw.on('close', cleanup);
-        request.raw.on('error', cleanup);
+        // Sockets can emit both 'close' and 'error' on abort; guard the cleanup
+        // so the second invocation is a no-op rather than re-clearing,
+        // unsubscribing, and calling .end() on a finished response.
+        let cleanedUp = false;
+        const cleanupOnce = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          cleanup();
+        };
+        request.raw.on('close', cleanupOnce);
+        request.raw.on('error', cleanupOnce);
       });
     }
 
@@ -677,7 +693,7 @@ export default async function adminRoutes(fastify, opts = {}) {
           TRANSACTIONS_MAX_SIZE,
         );
         const offset = Math.max(0, parseInt(request.query?.offset, 10) || 0);
-        console.log("QUERY", request.query); const start = request.query?.start || null;
+        const start = request.query?.start || null;
         const end = request.query?.end || null;
         const order_id = request.query?.order_id || null;
         
@@ -689,9 +705,25 @@ export default async function adminRoutes(fastify, opts = {}) {
 
         try {
           const transactions = await gobizClient.getRecentTransactions(params);
-          return reply.code(200).send({ 
-            transactions,
-            total: transactions.total ?? 0
+          // The adapter attaches the upstream `total` to the returned array as a
+          // side-channel property (asserted by the adapter contract tests). Read
+          // it defensively: it is useful for "Page X of Y" display but is not a
+          // reliable paging signal on its own (GoBiz's total can be approximate
+          // or filtered), so the authoritative `hasNext` is derived from whether
+          // a full page was returned.
+          const total =
+            Array.isArray(transactions) && typeof transactions.total === 'number'
+              ? transactions.total
+              : Array.isArray(transactions)
+                ? transactions.length
+                : 0;
+          const page = Array.isArray(transactions) ? transactions : [];
+          const hasNext = page.length >= size;
+          return reply.code(200).send({
+            transactions: page,
+            total,
+            size,
+            hasNext,
           });
         } catch (err) {
           request.log?.error?.(err);
@@ -714,6 +746,9 @@ export default async function adminRoutes(fastify, opts = {}) {
           return reply.code(404).send(buildErrorResponse('PAYMENT_NOT_FOUND'));
         }
         const png = await generateQrisImage(payment.qris_string);
+        // Same immutability rationale as the public route; cache under the
+        // Admin session (private — never shared across users by a shared cache).
+        reply.header('Cache-Control', 'private, max-age=300, immutable');
         return reply.code(200).type('image/png').send(png);
       });
     }

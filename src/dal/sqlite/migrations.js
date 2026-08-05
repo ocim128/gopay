@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS webhook_delivery_logs (
   request_body TEXT                    -- the JSON request body that was sent
 );
 
+-- Powers the Panel's per-payment delivery-log timeline (listByPayment), which
+-- filters by payment_id and orders by rowid (insertion order). The b-tree on
+-- payment_id preserves rowid order within each payment_id, so this single
+-- column is enough to make the query O(log n) instead of a full scan as the
+-- log table grows monotonically (every webhook attempt).
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_payment
+  ON webhook_delivery_logs(payment_id);
+
+-- Backs the Panel's payment-id prefix search (listAll with id LIKE 'abc%').
+-- A plain b-tree on id makes the LIKE sargable.
+CREATE INDEX IF NOT EXISTS idx_payments_id ON payments(id);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,

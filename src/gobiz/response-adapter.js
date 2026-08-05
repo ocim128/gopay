@@ -16,8 +16,6 @@
 //     raw,             // the original source object for downstream context
 //   }
 
-import moment from 'moment-timezone';
-
 /**
  * Select the canonical transaction id from a transaction object, using the
  * precedence `transaction_id ?? id ?? order_id`.
@@ -44,14 +42,22 @@ function toRupiah(grossAmount) {
 /**
  * Normalize a transaction timestamp into an ISO-8601 string.
  *
+ * Accepts anything `Date` can parse (ISO strings, epoch numbers, date strings).
+ * Returns `null` for absent or unparseable values, mirroring the previous
+ * `moment(time).isValid()` behaviour via `Number.isNaN` on the parsed time. A
+ * falsy input (including `0`, which is never a real transaction time) returns
+ * `null`, preserving the previous truthiness guard exactly.
+ *
  * @param {unknown} time - The raw transaction time value.
  * @returns {string|null} The ISO-8601 representation, or `null` when the value
  *   is absent or cannot be parsed.
  */
 function toIso(time) {
   if (!time) return null;
-  const m = moment(time);
-  return m.isValid() ? m.toISOString() : null;
+  const parsed = new Date(/** @type {any} */ (time));
+  // Invalid dates yield NaN; preserve the previous "null on bad input" contract.
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
 }
 
 /**

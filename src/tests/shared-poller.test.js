@@ -323,3 +323,81 @@ describe('SharedPoller — resilience', () => {
     expect(client.getRecentTransactions).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('SharedPoller — periodic maintenance', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('invokes onMaintenance at most once per maintenanceIntervalMs', async () => {
+    const client = makeFakeClient();
+    const maintenanceCalls = [];
+    // Use a realistic epoch base so the (now - 0) >= interval gate opens on the
+    // first tick, exactly like production where Date.now() is huge.
+    let t = 1_000_000;
+    const poller = createSharedPoller(client, {
+      getActiveCount: () => 1,
+      onTransactions: () => {},
+      getPollInterval: () => 1000,
+      onMaintenance: () => maintenanceCalls.push(t),
+      maintenanceIntervalMs: 10_000,
+      now: () => t,
+    });
+
+    poller.ensureRunning();
+    // First tick fires maintenance (lastMaintenanceAt was 0).
+    t = 1_001_000;
+    await vi.advanceTimersByTimeAsync(1000);
+    // Subsequent ticks within the window must NOT fire it again.
+    t = 1_005_000;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(maintenanceCalls).toHaveLength(1);
+
+    // Cross the maintenance boundary: a second invocation fires.
+    t = 1_012_000;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(maintenanceCalls).toHaveLength(2);
+  });
+
+  it('runs maintenance even when there are no active payments', async () => {
+    const client = makeFakeClient();
+    const maintenanceCalls = [];
+    // Start at a realistic epoch so the first gate opens.
+    let t = 1_000_000;
+    const poller = createSharedPoller(client, {
+      getActiveCount: () => 0,
+      onTransactions: () => {},
+      onMaintenance: () => maintenanceCalls.push(t),
+      maintenanceIntervalMs: 10_000,
+      now: () => t,
+    });
+
+    poller.ensureRunning();
+    // Drive one tick directly: maintenance runs BEFORE the active-count check,
+    // so it fires even when getActiveCount() returns 0.
+    await poller.onTick();
+    expect(maintenanceCalls).toHaveLength(1);
+  });
+
+  it('isolates a throwing onMaintenance from the loop', async () => {
+    const client = makeFakeClient();
+    const poller = createSharedPoller(client, {
+      getActiveCount: () => 1,
+      onTransactions: () => {},
+      getPollInterval: () => 5000,
+      onMaintenance: () => {
+        throw new Error('maintenance boom');
+      },
+      maintenanceIntervalMs: 0,
+    });
+
+    poller.ensureRunning();
+    await vi.advanceTimersByTimeAsync(5000);
+    // The loop survives and the tick still fetched transactions.
+    expect(client.getRecentTransactions).toHaveBeenCalledTimes(1);
+    expect(poller.running).toBe(true);
+  });
+});

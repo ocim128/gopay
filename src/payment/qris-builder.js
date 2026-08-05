@@ -15,6 +15,8 @@
 import crc from 'crc';
 import QRCode from 'qrcode';
 
+import { createHash } from 'node:crypto';
+
 import { getErrorDefinition } from '../errors.js';
 
 /**
@@ -151,6 +153,12 @@ export function buildDynamicQris(staticQris, amount) {
 /**
  * Render a QRIS string to a PNG image buffer.
  *
+ * The PNG is a pure function of the QRIS string (same input → identical bytes),
+ * and a Payment's `qris_string` is immutable once persisted, so the rendered
+ * image is memoized in an LRU cache keyed by a short hash of the string. Repeat
+ * views of the same payment (Panel <img>, checkout re-opens, browser back) skip
+ * the Reed-Solomon + rasterization work entirely.
+ *
  * The Payment_Service can wrap this into a data URL or serve it from an
  * internal endpoint; this function only produces the raw PNG bytes.
  *
@@ -158,6 +166,52 @@ export function buildDynamicQris(staticQris, amount) {
  * @returns {Promise<Buffer>} the PNG image bytes.
  */
 export async function generateQrisImage(qrisString) {
+  const key = cacheKey(qrisString);
+  const cached = pngCache.get(key);
+  if (cached !== undefined) {
+    // Refresh LRU recency: delete + re-insert moves the entry to the tail.
+    pngCache.delete(key);
+    pngCache.set(key, cached);
+    return cached;
+  }
   const dataUrl = await QRCode.toDataURL(qrisString, { scale: 8, errorCorrectionLevel: 'M' });
-  return Buffer.from(dataUrl.split(',')[1], 'base64');
+  const buf = Buffer.from(dataUrl.split(',')[1], 'base64');
+  pngCache.set(key, buf);
+  // Insertion-ordered Map → evict the oldest entry once over capacity.
+  if (pngCache.size > PNG_CACHE_MAX_ENTRIES) {
+    const oldest = pngCache.keys().next().value;
+    if (oldest !== undefined) {
+      pngCache.delete(oldest);
+    }
+  }
+  return buf;
+}
+
+/**
+ * Maximum number of rendered QR images to retain. Each PNG at scale 8 is
+ * roughly 2-4 KB, so 1024 entries cost ~3 MB at the top end — a small price for
+ * eliminating repeat renders of the most-viewed payments.
+ *
+ * @type {number}
+ */
+const PNG_CACHE_MAX_ENTRIES = 1024;
+
+/**
+ * The LRU cache: an insertion-ordered Map from a short hash of the QRIS string
+ * to its PNG bytes.
+ *
+ * @type {Map<string, Buffer>}
+ */
+const pngCache = new Map();
+
+/**
+ * Compute a short, collision-safe cache key for a QRIS string (first 32 hex
+ * chars of its SHA-256). The full string is not used as the key to keep the
+ * cache memory footprint trivially small regardless of QRIS length.
+ *
+ * @param {string} qrisString - the QRIS payload to key on.
+ * @returns {string} a 32-character hex digest prefix.
+ */
+function cacheKey(qrisString) {
+  return createHash('sha256').update(qrisString, 'utf8').digest('hex').slice(0, 32);
 }

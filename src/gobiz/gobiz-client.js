@@ -16,7 +16,6 @@
 // token, and retry the failed request exactly once.
 
 import crypto from 'node:crypto';
-import moment from 'moment-timezone';
 
 import { GOBIZ } from './endpoints.config.js';
 import { ResponseAdapter } from './response-adapter.js';
@@ -321,7 +320,7 @@ export class GoBizClient {
       startTime = window.startTime;
       endTime = window.endTime;
     }
-    const url = new URL(this.endpoints.resolveUrl('analytics')); console.log("GZ URL:", url.toString());
+    const url = new URL(this.endpoints.resolveUrl('analytics'));
     url.searchParams.set('from', String(offset || 0));
     url.searchParams.set('size', String(size));
     url.searchParams.set('statuses', ANALYTICS_STATUSES);
@@ -428,13 +427,20 @@ export class GoBizClient {
   /**
    * Compute the ISO-8601 start/end time window for the given number of days.
    *
+   * The endpoints receive absolute UTC ISO strings (`...Z`); the configured
+   * `timezone` is informational here (the previous moment chain
+   * `.tz(zone).toISOString()` also normalized back to UTC because the default
+   * `toISOString()` does not keep the offset). The result is therefore the same
+   * instant expressed as UTC, which is what the GoBiz API expects.
+   *
    * @param {number} days
    * @returns {{ startTime: string, endTime: string }}
    * @private
    */
   _timeWindow(days) {
-    const startTime = moment().subtract(days, 'days').tz(this.timezone).toISOString();
-    const endTime = moment().tz(this.timezone).toISOString();
+    const now = Date.now();
+    const startTime = new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+    const endTime = new Date(now).toISOString();
     return { startTime, endTime };
   }
 

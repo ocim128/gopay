@@ -472,7 +472,20 @@ export function createPaymentService(deps = {}) {
       return [];
     }
 
-    const active = gatherActive();
+    // Fast path: when the DAL exposes an indexed range scan, per-transaction
+    // candidate sets are fetched in O(log n + matches) instead of snapshotting
+    // every pending payment up front. The snapshot fallback below is kept for
+    // test mocks and backends that do not implement the method.
+    const hasIndexedLookup = typeof storage.payments.findCandidatesByAmount === 'function';
+    /** @type {import('../dal/storage-interface.js').Payment[]|null} */
+    const active = hasIndexedLookup ? null : gatherActive();
+    // The widest tolerance among active payments, used to widen the indexed
+    // range scan so it covers every payment's own tolerance window. Computed
+    // once per batch (a single scalar query); 0 on the snapshot path.
+    const tolerancePad =
+      hasIndexedLookup && typeof storage.payments.maxActiveTolerance === 'function'
+        ? storage.payments.maxActiveTolerance()
+        : 0;
     /** @type {Set<string>} ids settled within this batch (no double-match). */
     const consumed = new Set();
     /** @type {import('../dal/storage-interface.js').Payment[]} */
@@ -487,14 +500,32 @@ export function createPaymentService(deps = {}) {
         continue;
       }
 
-      // Candidates within tolerance, earliest-created first.
-      const candidates = active
-        .filter(
-          (p) =>
-            !consumed.has(p.id) &&
-            Math.abs(tx.amount - p.amount) <= p.tolerance,
-        )
-        .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // Candidates within tolerance, earliest-created first. The indexed path
+      // widens the range by `tolerancePad` (the widest tolerance among active
+      // payments) to cover any payment's tolerance window; each candidate is
+      // then filtered precisely in JS, exactly like the snapshot path. For the
+      // default tolerance=0 case the range is exact and the index returns the
+      // minimal candidate set.
+      let candidates;
+      if (active !== null) {
+        candidates = active
+          .filter(
+            (p) =>
+              !consumed.has(p.id) &&
+              Math.abs(tx.amount - p.amount) <= p.tolerance,
+          )
+          .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      } else {
+        const lo = tx.amount - tolerancePad;
+        const hi = tx.amount + tolerancePad;
+        candidates = storage.payments
+          .findCandidatesByAmount(lo, hi)
+          .filter(
+            (p) => !consumed.has(p.id) && Math.abs(tx.amount - p.amount) <= p.tolerance,
+          );
+        // The DAL already returns rows ordered by (created_at ASC, id ASC), so
+        // the tie-break is stable without an additional sort.
+      }
 
       if (candidates.length === 0) {
         // No match: ignore the transaction.

@@ -129,3 +129,40 @@ export function buildHttpError(errorCode, messageOverride) {
     body: buildErrorResponse(errorCode, messageOverride),
   };
 }
+
+/**
+ * Build the canonical Fastify error handler that renders the consistent
+ * `{ error_code, message }` shape for every error response:
+ *   * Fastify schema-validation failures -> 400 INVALID_REQUEST.
+ *   * Any error carrying a `.code` that is a known error_code -> its mapped
+ *     HTTP status + body.
+ *   * Anything else -> a generic 500 INTERNAL_ERROR (logged when a logger is
+ *     attached to the request).
+ *
+ * Centralizing this here means the payments plugin, the admin plugin, and the
+ * root server install the exact same handler; a change to error rendering is
+ * made in one place rather than three.
+ *
+ * @returns {(error: Error & { validation?: unknown, code?: string, message?: string }, request: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => void}
+ */
+export function createErrorHandler() {
+  return (error, request, reply) => {
+    if (error?.validation) {
+      const { http, body } = buildHttpError('INVALID_REQUEST');
+      return reply.code(http).send(body);
+    }
+    if (typeof error?.code === 'string') {
+      try {
+        getErrorDefinition(error.code);
+        const { http, body } = buildHttpError(error.code, error.message);
+        return reply.code(http).send(body);
+      } catch {
+        // Not a known domain code; fall through to a generic 500.
+      }
+    }
+    request.log?.error?.(error);
+    return reply
+      .code(500)
+      .send({ error_code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' });
+  };
+}

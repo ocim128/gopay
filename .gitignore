@@ -22,3 +22,6 @@ Thumbs.db
 
 # Kiro workspace (specs, steering, settings)
 .kiro/
+
+# CodeGraph index (local codebase indexing artifact)
+.codegraph/

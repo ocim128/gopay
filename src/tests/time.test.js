@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { toJakartaIso, toZonedIso, isValidTimezone, DISPLAY_TIMEZONE, DEFAULT_DISPLAY_TIMEZONE } from '../time.js';
+import { toJakartaIso, toZonedIso, isValidTimezone, DISPLAY_TIMEZONE, DEFAULT_DISPLAY_TIMEZONE, wallClockToEpochMs } from '../time.js';
 
 describe('toJakartaIso', () => {
   it('renders an offset-aware Asia/Jakarta (+07:00) ISO-8601 string', () => {
@@ -78,5 +78,39 @@ describe('toZonedIso', () => {
   it('returns null for nullish or non-finite input regardless of zone', () => {
     expect(toZonedIso(null, 'UTC')).toBeNull();
     expect(toZonedIso(Number.NaN, 'Asia/Makassar')).toBeNull();
+  });
+});
+
+describe('wallClockToEpochMs', () => {
+  it('interprets a wall-clock date in the given IANA zone', () => {
+    // 2026-01-15T00:00:00+07:00 (Asia/Jakarta) === 2026-01-14T17:00:00.000Z
+    const ms = wallClockToEpochMs(2026, 1, 15, 0, 0, 0, 'Asia/Jakarta');
+    expect(new Date(ms).toISOString()).toBe('2026-01-14T17:00:00.000Z');
+  });
+
+  it('honours a non-default zone (Asia/Makassar +08:00)', () => {
+    // 2026-01-15T00:00:00+08:00 === 2026-01-14T16:00:00.000Z
+    const ms = wallClockToEpochMs(2026, 1, 15, 0, 0, 0, 'Asia/Makassar');
+    expect(new Date(ms).toISOString()).toBe('2026-01-14T16:00:00.000Z');
+  });
+
+  it('UTC zone yields the same instant as Date.UTC', () => {
+    const ms = wallClockToEpochMs(2026, 1, 15, 12, 30, 45, 'UTC');
+    expect(ms).toBe(Date.UTC(2026, 0, 15, 12, 30, 45));
+  });
+
+  it('rolls day-of-month overflow into the next month', () => {
+    // Jan 32 === Feb 1; both start-of-day in WIB, exactly 24h apart.
+    const start = wallClockToEpochMs(2026, 1, 31, 0, 0, 0, 'Asia/Jakarta');
+    const end = wallClockToEpochMs(2026, 1, 32, 0, 0, 0, 'Asia/Jakarta');
+    expect(new Date(start).toISOString()).toBe('2026-01-30T17:00:00.000Z');
+    expect(new Date(end).toISOString()).toBe('2026-01-31T17:00:00.000Z');
+    expect(end - start).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('falls back to the default zone for an unknown zone name', () => {
+    const ok = wallClockToEpochMs(2026, 1, 15, 0, 0, 0, 'Mars/Phobos');
+    const def = wallClockToEpochMs(2026, 1, 15, 0, 0, 0, 'Asia/Jakarta');
+    expect(ok).toBe(def);
   });
 });

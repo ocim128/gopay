@@ -214,23 +214,46 @@ export function createSqliteStorage(options) {
     "SELECT COUNT(*) AS n FROM payments WHERE status = 'pending'",
   );
 
+  // Settlement matching: range scan over the partial unique index
+  // `uniq_pending_amount` (a b-tree on `amount WHERE status = 'pending'`), so a
+  // transaction's candidate set is found in O(log n + matches) instead of
+  // scanning every pending payment. Ordered earliest-created first to match the
+  // tie-break the Payment_Service applies.
+  const findCandidatesByAmountStmt = db.prepare(
+    `SELECT * FROM payments
+       WHERE status = 'pending' AND amount BETWEEN ? AND ?
+       ORDER BY created_at ASC, id ASC`,
+  );
+
+  // The maximum `tolerance` among currently-pending payments. Used to widen the
+  // candidate range scan so it covers any payment's tolerance window; each
+  // candidate is then filtered precisely in JS. A single scalar query, run once
+  // per batch, keeps the fast path correct regardless of the tolerance values
+  // any payment happens to carry.
+  const maxActiveToleranceStmt = db.prepare(
+    `SELECT MAX(tolerance) AS m FROM payments WHERE status = 'pending'`,
+  );
+
+  // A single prepared statement per query covers every filter combination
+  // (status / id-prefix / created_at range) via NULL-trick predicates: a NULL
+  // parameter short-circuits its clause to TRUE, so the same compiled plan is
+  // reused across all 8 filter shapes the Panel can produce. The `idx_payments_id`
+  // and `idx_payments_status_created_id` indexes make the LIKE / status
+  // predicates sargable.
   const listAllStmt = db.prepare(
     `SELECT * FROM payments
+     WHERE (@status IS NULL OR status = @status)
+       AND (@id IS NULL OR id LIKE @id)
+       AND (@start IS NULL OR (created_at >= @start AND created_at < @end))
      ORDER BY created_at DESC, id DESC
-     LIMIT ? OFFSET ?`,
+     LIMIT @limit OFFSET @offset`,
   );
 
-  const listAllByStatusStmt = db.prepare(
-    `SELECT * FROM payments
-     WHERE status = ?
-     ORDER BY created_at DESC, id DESC
-     LIMIT ? OFFSET ?`,
-  );
-
-  const countAllStmt = db.prepare('SELECT COUNT(*) AS n FROM payments');
-
-  const countAllByStatusStmt = db.prepare(
-    'SELECT COUNT(*) AS n FROM payments WHERE status = ?',
+  const countAllStmt = db.prepare(
+    `SELECT COUNT(*) AS n FROM payments
+     WHERE (@status IS NULL OR status = @status)
+       AND (@id IS NULL OR id LIKE @id)
+       AND (@start IS NULL OR (created_at >= @start AND created_at < @end))`,
   );
 
   const configGetStmt = db.prepare('SELECT value FROM config WHERE key = ?');
@@ -282,6 +305,16 @@ export function createSqliteStorage(options) {
     `UPDATE webhook_delivery_logs
        SET status = 'failed_permanent'
      WHERE id = ?`,
+  );
+
+  // Retention: prune delivery-log rows older than the cutoff. Backs the poller's
+  // once-daily cleanup so the log table cannot grow without bound. The cutoff is
+  // a timestamp (epoch ms) supplied by the caller; a single DELETE uses the
+  // idx_webhook_logs_payment index only incidentally — the scan is bounded by
+  // the WHERE, and a periodic prune keeps the table small enough that it is
+  // cheap regardless.
+  const pruneWebhookLogsStmt = db.prepare(
+    `DELETE FROM webhook_delivery_logs WHERE last_attempt_at < ?`,
   );
 
   const getAdminUserByUsernameStmt = db.prepare(
@@ -392,59 +425,42 @@ export function createSqliteStorage(options) {
    * before reaching the DAL. Optional `id` does a LIKE search, and `date`
    * filters by a `created_at` epoch range.
    *
+   * All filter combinations are served by a single prepared statement: a NULL
+   * `status`/`id`/`start` parameter short-circuits its own predicate to TRUE, so
+   * the same compiled plan is reused for every shape and the per-call
+   * parse/plan cost is avoided.
+   *
    * @param {{ status?: ('pending'|'paid'|'expired'|null), limit?: number, offset?: number, id?: string, date?: { start: number, end: number } }} [options]
    * @returns {import('../storage-interface.js').Payment[]}
    */
   function listAll(options = {}) {
     const { limit, offset } = normalizeHistoryOptions(options);
-    
-    let sql = 'SELECT * FROM payments WHERE 1=1';
-    const params = [];
-    
-    if (options.status) {
-      sql += ' AND status = ?';
-      params.push(options.status);
-    }
-    if (options.id) {
-      sql += ' AND id LIKE ?';
-      params.push(`${options.id}%`);
-    }
-    if (options.date) {
-      sql += ' AND created_at >= ? AND created_at < ?';
-      params.push(options.date.start, options.date.end);
-    }
-    
-    sql += ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?';
-    params.push(limit, offset);
-    
-    return db.prepare(sql).all(...params);
+    return listAllStmt.all({
+      status: options.status ?? null,
+      // `id` is a prefix search; NULL disables the predicate entirely.
+      id: options.id ? `${options.id}%` : null,
+      start: options.date?.start ?? null,
+      end: options.date?.end ?? null,
+      limit,
+      offset,
+    });
   }
 
   /**
    * Count payments across every status, or only those in `status` when one is
-   * given. Optionally filters by `id` and `date`.
+   * given. Optionally filters by `id` and `date`. Uses the same NULL-trick
+   * prepared statement as {@link listAll} so no SQL is recompiled per call.
    *
    * @param {{ status?: ('pending'|'paid'|'expired'|null), id?: string, date?: { start: number, end: number } }} [options]
    * @returns {number}
    */
   function countAll(options = {}) {
-    let sql = 'SELECT COUNT(*) AS n FROM payments WHERE 1=1';
-    const params = [];
-    
-    if (options.status) {
-      sql += ' AND status = ?';
-      params.push(options.status);
-    }
-    if (options.id) {
-      sql += ' AND id LIKE ?';
-      params.push(`${options.id}%`);
-    }
-    if (options.date) {
-      sql += ' AND created_at >= ? AND created_at < ?';
-      params.push(options.date.start, options.date.end);
-    }
-    
-    const row = db.prepare(sql).get(...params);
+    const row = countAllStmt.get({
+      status: options.status ?? null,
+      id: options.id ? `${options.id}%` : null,
+      start: options.date?.start ?? null,
+      end: options.date?.end ?? null,
+    });
     return row.n;
   }
 
@@ -527,6 +543,38 @@ export function createSqliteStorage(options) {
   function countActive() {
     const row = countActiveStmt.get();
     return row.n;
+  }
+
+  /**
+   * Find pending payments whose `amount` falls within `[minAmount, maxAmount]`,
+   * ordered earliest-created first (`created_at ASC, id ASC`) so the caller can
+   * settle the oldest match first. Backed by the partial unique index
+   * `uniq_pending_amount`, the lookup is O(log n + matches) rather than a scan
+   * of every pending payment.
+   *
+   * Note: because each payment carries its own `tolerance`, the caller is
+   * expected to widen the range by the maximum tolerated delta before calling,
+   * and to apply the precise `|tx.amount - p.amount| <= p.tolerance` filter to
+   * the returned rows.
+   *
+   * @param {number} minAmount - inclusive lower bound (Rupiah).
+   * @param {number} maxAmount - inclusive upper bound (Rupiah).
+   * @returns {import('../storage-interface.js').Payment[]}
+   */
+  function findCandidatesByAmount(minAmount, maxAmount) {
+    return findCandidatesByAmountStmt.all(minAmount, maxAmount);
+  }
+
+  /**
+   * Return the maximum `tolerance` among currently-pending payments, or 0 when
+   * there are none. The Payment_Service uses this to widen the indexed candidate
+   * range scan so it covers every payment's own tolerance window.
+   *
+   * @returns {number}
+   */
+  function maxActiveTolerance() {
+    const row = maxActiveToleranceStmt.get();
+    return Number.isFinite(row?.m) ? row.m : 0;
   }
 
   // ---- config store ---------------------------------------------------------
@@ -695,6 +743,19 @@ export function createSqliteStorage(options) {
     return listWebhookLogsByPaymentStmt.all(paymentId);
   }
 
+  /**
+   * Delete every delivery-log row whose `last_attempt_at` is strictly before
+   * `cutoff` (epoch ms). Returns how many rows were removed. Used by the poller's
+   * once-daily retention pass so the log table cannot grow without bound.
+   *
+   * @param {number} cutoff - epoch ms; rows older than this are deleted.
+   * @returns {number}
+   */
+  function webhookLogPruneOld(cutoff) {
+    const info = pruneWebhookLogsStmt.run(cutoff);
+    return info.changes;
+  }
+
   // ---- adminUsers store -----------------------------------------------------
 
   /**
@@ -816,6 +877,7 @@ export function createSqliteStorage(options) {
     append: webhookLogAppend,
     markPermanentFailure: webhookLogMarkPermanentFailure,
     listByPayment: webhookLogListByPayment,
+    pruneOld: webhookLogPruneOld,
   };
 
   const adminUsers = {
@@ -841,6 +903,8 @@ export function createSqliteStorage(options) {
       expireOverdue,
       expireOverdueReturning,
       countActive,
+      findCandidatesByAmount,
+      maxActiveTolerance,
     },
     apiKeys,
     webhookLogs,

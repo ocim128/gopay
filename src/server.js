@@ -50,42 +50,101 @@ import { hashPasswordSync } from './auth/hashing.js';
 import { generateQrisImage } from './payment/qris-builder.js';
 import paymentsRoutes from './routes/payments.routes.js';
 import adminRoutes from './routes/admin.routes.js';
-import { getErrorDefinition, buildHttpError } from './errors.js';
+import { createErrorHandler } from './errors.js';
 
 // Load .env into process.env. dotenv does not override variables that are
 // already set, so an injected test environment always wins.
 dotenv.config();
 
 /**
- * Install a root error handler that renders the consistent
- * `{ error_code, message }` shape:
- *   * Fastify schema-validation failures -> 400 INVALID_REQUEST.
- *   * Any error carrying a `.code` that is a known error_code -> its mapped
- *     HTTP status + body.
- *   * Anything else -> a generic 500.
+ * The default Fastify (pino) logger configuration.
+ *
+ * Logging was previously disabled (`logger: false`), which silently swallowed
+ * every `request.log?.error?.(...)` call in the error handlers. Enabling pino
+ * gives structured, request-id-correlated logs — essential for diagnosing
+ * payment/webhook failures in production. Sensitive headers and fields are
+ * redacted so secrets never reach the log sink.
+ *
+ * The level is taken from `LOG_LEVEL` (default `info`).
+ *
+ * @returns {{ level: string, redact: { paths: string[], remove: boolean } }}
+ */
+function defaultLoggerConfig() {
+  return {
+    level: process.env.LOG_LEVEL ?? 'info',
+    redact: {
+      paths: [
+        'req.headers.authorization',
+        'req.headers["x-api-key"]',
+        'req.headers.cookie',
+        'body.webhook_url',
+        'body.password',
+      ],
+      remove: true,
+    },
+  };
+}
+
+/**
+ * Default webhook delivery-log retention: 30 days. The prune pass deletes rows
+ * whose `last_attempt_at` is older than this. Tunable via
+ * `WEBHOOK_LOG_RETENTION_DAYS` (an integer number of days; non-positive values
+ * fall back to the default, effectively disabling pruning only when set to 0).
+ *
+ * @type {number}
+ */
+const DEFAULT_WEBHOOK_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Parse the `WEBHOOK_LOG_RETENTION_DAYS` env var into a retention window in
+ * milliseconds. A missing or non-positive value falls back to `defaultMs`.
+ *
+ * @param {string|undefined} raw
+ * @param {number} defaultMs
+ * @returns {number}
+ */
+function parseRetentionMs(raw, defaultMs) {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    return defaultMs;
+  }
+  return n * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Resolve the Fastify `logger` option for {@link buildServer}.
+ *
+ * Precedence (highest first):
+ *   1. An explicit `logger` key in the caller's `fastifyOptions` (lets tests,
+ *      operators, or alternate entry points force-enable or force-disable).
+ *   2. `LOG_LEVEL` if set in the environment (explicit opt-in to logging even
+ *      under NODE_ENV=test, useful for debugging a single test).
+ *   3. `false` when `NODE_ENV === 'test'` (keeps the suite's stdout clean).
+ *   4. The {@link defaultLoggerConfig} (production default: redacted pino).
+ *
+ * @param {{ logger?: unknown }} fastifyOptions
+ * @returns {unknown}
+ */
+function resolveLoggerConfig(fastifyOptions) {
+  if ('logger' in fastifyOptions) {
+    return fastifyOptions.logger;
+  }
+  if (process.env.LOG_LEVEL !== undefined) {
+    return defaultLoggerConfig();
+  }
+  if (process.env.NODE_ENV === 'test') {
+    return false;
+  }
+  return defaultLoggerConfig();
+}
+
+/**
+ * Install the canonical Fastify error handler (see {@link createErrorHandler}).
  *
  * @param {import('fastify').FastifyInstance} app
  */
 function installErrorHandler(app) {
-  app.setErrorHandler((error, request, reply) => {
-    if (error?.validation) {
-      const { http, body } = buildHttpError('INVALID_REQUEST');
-      return reply.code(http).send(body);
-    }
-    if (typeof error?.code === 'string') {
-      try {
-        getErrorDefinition(error.code);
-        const { http, body } = buildHttpError(error.code, error.message);
-        return reply.code(http).send(body);
-      } catch {
-        // Not a known domain code; fall through to a generic 500.
-      }
-    }
-    request.log?.error?.(error);
-    return reply
-      .code(500)
-      .send({ error_code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' });
-  });
+  app.setErrorHandler(createErrorHandler());
 }
 
 /**
@@ -240,6 +299,23 @@ export async function buildServer(options = {}) {
       // a full Poll_Interval, so the gap between create and the first fetch is
       // minimized (mitigates the poller "warm-up" window).
       pollImmediately: true,
+      // Once-daily housekeeping: prune webhook delivery-log rows older than the
+      // retention window so the table cannot grow without bound. Rides the poll
+      // tick (no extra timer) and is best-effort; a throw is logged, not fatal.
+      onMaintenance: () => {
+        const retentionMs = parseRetentionMs(
+          process.env.WEBHOOK_LOG_RETENTION_DAYS,
+          DEFAULT_WEBHOOK_LOG_RETENTION_MS,
+        );
+        if (typeof storage.webhookLogs?.pruneOld === 'function') {
+          const cutoff = Date.now() - retentionMs;
+          const removed = storage.webhookLogs.pruneOld(cutoff);
+          if (removed > 0) {
+            // eslint-disable-next-line no-console
+            console.log(`[server] Pruned ${removed} webhook delivery-log rows older than ${Math.round(retentionMs / (24 * 60 * 60 * 1000))} day(s).`);
+          }
+        }
+      },
     });
   }
 
@@ -262,8 +338,12 @@ export async function buildServer(options = {}) {
     });
   }
 
-  // 8) Build Fastify and register routes.
-  const app = Fastify({ logger: false, trustProxy: true, ...(options.fastifyOptions ?? {}) });
+  // 8) Build Fastify and register routes. The default logger is enabled in
+  //    production; under NODE_ENV=test it is disabled by default so test output
+  //    stays clean. Either path can be overridden via fastifyOptions.logger.
+  const fastifyOptions = options.fastifyOptions ?? {};
+  const loggerConfig = resolveLoggerConfig(fastifyOptions);
+  const app = Fastify({ logger: loggerConfig, trustProxy: true, ...fastifyOptions });
 
   installErrorHandler(app);
 
