@@ -1,0 +1,43 @@
+# Render Blueprint for the GoPay backend API.
+#
+# This intentionally describes only the backend. The admin panel is a separate
+# Node service and is not required for AutoBeli-to-API integration.
+#
+# The free plan is suitable for deployment testing only: Render free services
+# sleep when idle and have ephemeral storage. For real payments, upgrade this
+# service and attach a persistent disk, then set DB_PATH and TOKEN_FILE_PATH
+# to paths on that disk.
+
+services:
+  - type: web
+    name: gopay-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TZ
+        value: Asia/Jakarta
+
+      # Configure these as secrets in Render. They are intentionally not
+      # included as literal values in this repository.
+      - key: GOPAY_EMAIL
+        sync: false
+      - key: GOPAY_PASSWORD
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: MASTER_KEY
+        sync: false
+      - key: WEBHOOK_HMAC_KEY
+        sync: false
+      - key: ADMIN_SESSION_SECRET
+        sync: false

@@ -179,6 +179,7 @@ from **API Keys** and put it in `panel/.env` as `PANEL_API_KEY`.
 | `PORT` | optional | Backend listen port (default `3000`). |
 | `HOST` | optional | Backend bind host (default `0.0.0.0`). |
 | `DB_PATH` | optional | SQLite database path (default under `data/`). |
+| `TOKEN_FILE_PATH` | optional | Encrypted GoBiz token path (default `.gopay_token.enc`). |
 | `NODE_ENV` | optional | When `production`, marks the admin session cookie `Secure` (HTTPS only). Leave unset to allow plain `http://IP:port`. |
 | `TZ` | optional | Process timezone for local-time formatting (PM2 pins `Asia/Jakarta`). Stored timestamps stay UTC epoch ms. |
 
@@ -205,6 +206,31 @@ from **API Keys** and put it in `panel/.env` as `PANEL_API_KEY`.
 ---
 
 ## Deployment
+
+### Render Web Service
+
+The repository includes [render.yaml](./render.yaml) for deploying the
+backend API as a Render Web Service. It uses Render's injected PORT, binds
+to 0.0.0.0, and exposes GET /health for Render health checks.
+
+The Blueprint is configured for the Free plan so it can be used for an initial
+deployment test. Render Free services are not suitable for real payments:
+they sleep after inactivity and their local filesystem is ephemeral. This
+service stores payment state in SQLite and the GoBiz access token on disk, so
+data can be lost after a restart, redeploy, or sleep.
+
+For a paid Render deployment:
+
+1. Upgrade the service to a paid instance.
+2. Attach a persistent disk mounted at /var/lib/gopay.
+3. Set these Render environment variables:
+   DB_PATH=/var/lib/gopay/panel.db
+   TOKEN_FILE_PATH=/var/lib/gopay/.gopay_token.enc
+4. Set all secret variables from render.yaml in the Render dashboard.
+5. Use the resulting HTTPS service URL as the backend URL in AutoBeli.
+
+The admin panel is not included in the Render Blueprint. Keep it private or
+deploy it as a separate service; AutoBeli only needs the backend API.
 
 Two supported topologies. Both run the **backend** (`gopay-api`, port `3000`) and
 the **panel** (`gopay-panel`, port `3001`) under PM2. The panel reaches the

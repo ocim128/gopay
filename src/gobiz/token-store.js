@@ -72,7 +72,7 @@ export class TokenStore {
    */
   constructor(options = {}) {
     const {
-      filePath = DEFAULT_TOKEN_FILE,
+      filePath = process.env.TOKEN_FILE_PATH || DEFAULT_TOKEN_FILE,
       masterKey = process.env.MASTER_KEY,
       logger = console,
     } = options;
@@ -245,6 +245,7 @@ export class TokenStore {
    * @private
    */
   _writeFile(contents) {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     fs.writeFileSync(this.filePath, contents, { mode: FILE_MODE });
     try {
       fs.chmodSync(this.filePath, FILE_MODE);

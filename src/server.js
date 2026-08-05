@@ -182,7 +182,9 @@ export async function buildServer(options = {}) {
   let gobizClient = options.gobizClient ?? null;
   if (!gobizClient) {
     const transport = new HttpTransport();
-    const tokenStore = createTokenStore();
+    const tokenStore = createTokenStore({
+      filePath: process.env.TOKEN_FILE_PATH,
+    });
     const auth = createAuthTokenManager(transport, tokenStore, {
       email: process.env.GOPAY_EMAIL,
       password: process.env.GOPAY_PASSWORD,
@@ -264,6 +266,11 @@ export async function buildServer(options = {}) {
   const app = Fastify({ logger: false, trustProxy: true, ...(options.fastifyOptions ?? {}) });
 
   installErrorHandler(app);
+
+  // Render and other supervisors use a lightweight unauthenticated health
+  // check to decide whether the process is ready to receive traffic. Keep
+  // this endpoint independent from GoBiz authentication and payment state.
+  app.get('/health', async () => ({ status: 'ok' }));
 
   // Machine-facing payment routes; the plugin attaches the API-key preHandler
   // on its own scope, so every /payment* route is API-key protected.
