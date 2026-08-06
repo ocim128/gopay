@@ -53,16 +53,16 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('never lets two pending rows share an amount and reuses released amounts', () => {
-    fc.assert(
-      fc.property(fc.array(opArb, { minLength: 1, maxLength: 60 }), (ops) => {
+  it('never lets two pending rows share an amount and reuses released amounts', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 60 }), async (ops) => {
         storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
         const payments = storage.payments;
 
@@ -80,7 +80,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
         for (const op of ops) {
           if (op.kind === 'create') {
             const id = nextId();
-            const result = payments.insertPending({
+            const result = await payments.insertPending({
               id,
               amount: op.amount,
               qris_string: 'QRIS-PAYLOAD',
@@ -99,7 +99,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
               // An amount still held by a pending row must be rejected.
               expect(result).toEqual({ ok: false, code: 'AMOUNT_IN_USE' });
               // Rejected insert stores no row.
-              expect(payments.getById(id)).toBeNull();
+              expect(await payments.getById(id)).toBeNull();
             }
           } else if (op.kind === 'settle') {
             const pendingRows = created.filter((p) => p.status === 'pending');
@@ -107,7 +107,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
               continue;
             }
             const victim = pendingRows[op.target % pendingRows.length];
-            const res = payments.markPaid(victim.id, {
+            const res = await payments.markPaid(victim.id, {
               txId: `tx-${victim.id}`,
               paidAmount: victim.amount,
               paidAt: 50,
@@ -118,7 +118,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
             pendingByAmount.delete(victim.amount);
           } else {
             // expire
-            payments.expireOverdue(op.now);
+            await payments.expireOverdue(op.now);
             for (const p of created) {
               if (p.status === 'pending' && p.expiresAt < op.now) {
                 p.status = 'expired';
@@ -130,7 +130,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
 
           // (a) Invariant after every op: no two pending rows share an amount.
           // listActive returns only pending rows; pull all of them.
-          const active = payments.listActive({ limit: 100 });
+          const active = await payments.listActive({ limit: 100 });
           const amounts = active.map((p) => p.amount);
           const uniqueAmounts = new Set(amounts);
           expect(uniqueAmounts.size).toBe(amounts.length);
@@ -141,7 +141,7 @@ describe('Property 7: pending amount uniqueness & reuse after release', () => {
           expect(dalPendingAmounts).toEqual(modelPendingAmounts);
         }
 
-        storage.close();
+        await storage.close();
         storage = null;
       }),
       { numRuns: 100 },

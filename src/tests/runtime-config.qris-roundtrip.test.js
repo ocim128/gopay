@@ -56,30 +56,30 @@ describe('Static_QRIS round-trip: Config Service -> QRIS_Builder', () => {
     config = createConfigService(storage);
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
-  it('stores a valid Static_QRIS and reads back exactly what was stored', () => {
-    const stored = config.setStaticQris(VALID_STATIC_QRIS);
+  it('stores a valid Static_QRIS and reads back exactly what was stored', async () => {
+    const stored = await config.setStaticQris(VALID_STATIC_QRIS);
     expect(stored).toBe(VALID_STATIC_QRIS);
     // The value read back equals the value the setter persisted.
-    expect(config.getStaticQris()).toBe(stored);
-    expect(config.getStaticQris()).toBe(VALID_STATIC_QRIS);
+    expect(await config.getStaticQris()).toBe(stored);
+    expect(await config.getStaticQris()).toBe(VALID_STATIC_QRIS);
   });
 
-  it('reads back the trimmed value when stored with surrounding whitespace', () => {
-    const stored = config.setStaticQris(`  \t ${VALID_STATIC_QRIS} \n `);
+  it('reads back the trimmed value when stored with surrounding whitespace', async () => {
+    const stored = await config.setStaticQris(`  \t ${VALID_STATIC_QRIS} \n `);
     // Trimming behavior: the stored/read value carries no surrounding whitespace.
     expect(stored).toBe(VALID_STATIC_QRIS);
-    expect(config.getStaticQris()).toBe(VALID_STATIC_QRIS);
+    expect(await config.getStaticQris()).toBe(VALID_STATIC_QRIS);
   });
 
-  it('builds a Dynamic_QRIS from the read value, embedding the amount', () => {
-    config.setStaticQris(VALID_STATIC_QRIS);
+  it('builds a Dynamic_QRIS from the read value, embedding the amount', async () => {
+    await config.setStaticQris(VALID_STATIC_QRIS);
 
     const amount = 12345;
-    const readValue = config.getStaticQris();
+    const readValue = await config.getStaticQris();
 
     // The builder consumes the value the Config Service read back, not env.
     let dynamicQris;
@@ -91,9 +91,9 @@ describe('Static_QRIS round-trip: Config Service -> QRIS_Builder', () => {
     expect(decodeAmountField(dynamicQris)).toBe(String(amount));
   });
 
-  it('round-trips the amount for several distinct values', () => {
-    config.setStaticQris(VALID_STATIC_QRIS);
-    const readValue = config.getStaticQris();
+  it('round-trips the amount for several distinct values', async () => {
+    await config.setStaticQris(VALID_STATIC_QRIS);
+    const readValue = await config.getStaticQris();
 
     for (const amount of [1, 1000, 50000, 999999]) {
       const dynamicQris = buildDynamicQris(readValue, amount);

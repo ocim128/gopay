@@ -25,22 +25,22 @@ const VALID_STATIC_QRIS =
   '00020101021126610014COM.GO-JEK.WWW01189360091434970566750210G4970566750303UMI51440014ID.CO.QRIS.WWW0215ID10254118460050303UMI5204899953033605802ID5925Scalify Panel, Digital & 6015JAKARTA SELATAN61051200062070703A016304CD45';
 
 // A minimal Config Service stub: the Payment_Service only reads getStaticQris().
-const configStub = { getStaticQris: () => VALID_STATIC_QRIS };
+const configStub = { getStaticQris: async () => VALID_STATIC_QRIS };
 
 describe('Property 16: Idempotency with respect to txId', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('a repeated txId settles at most one payment across batches and within a batch', () => {
-    fc.assert(
-      fc.property(
+  it('a repeated txId settles at most one payment across batches and within a batch', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // Distinct Payment amounts (Rupiah) so every Payment can be pending at
         // once. tolerance is 0, so a transaction settles a Payment only when its
         // amount equals that Payment's amount exactly.
@@ -64,7 +64,7 @@ describe('Property 16: Idempotency with respect to txId', () => {
           }),
           { minLength: 1, maxLength: 5 },
         ),
-        (amounts, txIdPool, batchSpecs) => {
+        async (amounts, txIdPool, batchSpecs) => {
           // Fresh in-memory storage per run so amounts never collide across runs.
           storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
 
@@ -79,10 +79,11 @@ describe('Property 16: Idempotency with respect to txId', () => {
           });
 
           // Create one pending Payment per distinct amount (tolerance 0).
-          const paymentIds = amounts.map(
-            (amount) =>
-              service.createPayment({ mode: 'client', amount, tolerance: 0 }).id,
-          );
+          const paymentIds = [];
+          for (const amount of amounts) {
+            const created = await service.createPayment({ mode: 'client', amount, tolerance: 0 });
+            paymentIds.push(created.id);
+          }
 
           // Move the clock just past creation but well within the timeout.
           clock = createdAt + 1_000;
@@ -100,7 +101,7 @@ describe('Property 16: Idempotency with respect to txId', () => {
               raw: {},
             }));
 
-            const settled = service.handleTransactions(transactions);
+            const settled = await service.handleTransactions(transactions);
 
             for (const payment of settled) {
               settledByTxId.set(
@@ -121,7 +122,7 @@ describe('Property 16: Idempotency with respect to txId', () => {
           /** @type {Map<string, number>} */
           const persistedByTxId = new Map();
           for (const id of paymentIds) {
-            const stored = storage.payments.getById(id);
+            const stored = await storage.payments.getById(id);
             if (stored.status === 'paid' && typeof stored.tx_id === 'string') {
               persistedByTxId.set(
                 stored.tx_id,
@@ -141,7 +142,7 @@ describe('Property 16: Idempotency with respect to txId', () => {
             expect(persistedByTxId.get(txId)).toBe(count);
           }
 
-          storage.close();
+          await storage.close();
           storage = null;
         },
       ),

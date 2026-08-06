@@ -85,9 +85,9 @@ export function deriveKeyPrefix(fullValue) {
  * @param {() => string} [deps.generateValue] - key value generator; defaults to
  *   {@link generateApiKeyValue}.
  * @returns {{
- *   createApiKey: () => { id: string, value: string, key_prefix: string, status: 'active', created_at: number },
- *   listApiKeys: () => import('../dal/storage-interface.js').MaskedApiKey[],
- *   revokeApiKey: (id: string) => import('../dal/storage-interface.js').Result<import('../dal/storage-interface.js').MaskedApiKey>
+ *   createApiKey: () => Promise<{ id: string, value: string, key_prefix: string, status: 'active', created_at: number }>,
+ *   listApiKeys: () => Promise<import('../dal/storage-interface.js').MaskedApiKey[]>,
+ *   revokeApiKey: (id: string) => Promise<import('../dal/storage-interface.js').Result<import('../dal/storage-interface.js').MaskedApiKey>>
  * }}
  */
 export function createApiKeyManager(storage, deps = {}) {
@@ -106,10 +106,10 @@ export function createApiKeyManager(storage, deps = {}) {
    * exactly once for the Panel to show. The full value
    * is intentionally not persisted and cannot be retrieved again afterwards.
    *
-   * @returns {{ id: string, value: string, key_prefix: string, status: 'active', created_at: number }}
+   * @returns {Promise<{ id: string, value: string, key_prefix: string, status: 'active', created_at: number }>}
    * @throws {Error} if a unique key could not be generated within the retry bound.
    */
-  function createApiKey() {
+  async function createApiKey() {
     for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
       const value = generateValue();
       const keyHash = hashApiKey(value);
@@ -117,7 +117,8 @@ export function createApiKeyManager(storage, deps = {}) {
       const id = idFactory();
       const createdAt = now();
 
-      const result = storage.apiKeys.create({ id, keyHash, keyPrefix, createdAt });
+      // eslint-disable-next-line no-await-in-loop
+      const result = await storage.apiKeys.create({ id, keyHash, keyPrefix, createdAt });
       if (result.ok) {
         // Reveal the full value exactly once; the DAL stored only the hash.
         return {
@@ -140,9 +141,9 @@ export function createApiKeyManager(storage, deps = {}) {
    * List all API keys in masked form for display in the Panel. The full value
    * and hash are never included.
    *
-   * @returns {import('../dal/storage-interface.js').MaskedApiKey[]}
+   * @returns {Promise<import('../dal/storage-interface.js').MaskedApiKey[]>}
    */
-  function listApiKeys() {
+  async function listApiKeys() {
     return storage.apiKeys.listMasked();
   }
 
@@ -152,10 +153,10 @@ export function createApiKeyManager(storage, deps = {}) {
    * `{ ok:false, code:'KEY_NOT_REVOCABLE' }` and no key is modified.
    *
    * @param {string} id
-   * @returns {import('../dal/storage-interface.js').Result<import('../dal/storage-interface.js').MaskedApiKey>}
+   * @returns {Promise<import('../dal/storage-interface.js').Result<import('../dal/storage-interface.js').MaskedApiKey>>}
    */
-  function revokeApiKey(id) {
-    const result = storage.apiKeys.revoke(id, now());
+  async function revokeApiKey(id) {
+    const result = await storage.apiKeys.revoke(id, now());
     if (!result.ok) {
       return result;
     }

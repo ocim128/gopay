@@ -27,19 +27,19 @@ describe('Property 10: Lazy-expire', () => {
   /** @type {number} mutable injected clock (epoch ms). */
   let clock;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
     config = createConfigService(storage);
-    config.setStaticQris(VALID_STATIC_QRIS);
+    await config.setStaticQris(VALID_STATIC_QRIS);
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
-  it('returns pending at/before expires_at and expired once now passes it', () => {
-    fc.assert(
-      fc.property(
+  it('returns pending at/before expires_at and expired once now passes it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // Amount within the valid range so the Payment is always creatable.
         fc.integer({ min: 1000, max: 9999000 }),
         // The creation time (epoch ms).
@@ -48,7 +48,7 @@ describe('Property 10: Lazy-expire', () => {
         fc.integer({ min: 1000, max: 86_400_000 }),
         // The overshoot past expires_at, delta > 0 (ms).
         fc.integer({ min: 1000, max: 86_400_000 }),
-        (amount, createdAt, t, delta) => {
+        async (amount, createdAt, t, delta) => {
           const service = createPaymentService({
             storage,
             config,
@@ -56,7 +56,7 @@ describe('Property 10: Lazy-expire', () => {
           });
 
           clock = createdAt;
-          const created = service.createPayment({
+          const created = await service.createPayment({
             mode: 'client',
             amount,
             timeout: t,
@@ -67,23 +67,23 @@ describe('Property 10: Lazy-expire', () => {
 
           // Reading before expiry: still pending.
           clock = created.expires_at - 1;
-          expect(service.getPayment(created.id).status).toBe('pending');
+          expect((await service.getPayment(created.id)).status).toBe('pending');
 
           // Reading exactly at expires_at: the boundary has not been passed yet,
           // so the Payment is still pending.
           clock = created.expires_at;
-          expect(service.getPayment(created.id).status).toBe('pending');
+          expect((await service.getPayment(created.id)).status).toBe('pending');
 
           // Reading after now passes expires_at (delta > 0): expired.
           clock = created.expires_at + delta;
-          const afterExpiry = service.getPayment(created.id);
+          const afterExpiry = await service.getPayment(created.id);
           expect(afterExpiry.status).toBe('expired');
 
           // The lazy transition is persisted, not merely computed on read.
           // Once expired, the Payment's Amount is released (the pending-amount
           // unique index only covers pending rows), so a later run that draws
           // the same Amount can still create its own pending Payment.
-          expect(storage.payments.getById(created.id).status).toBe('expired');
+          expect((await storage.payments.getById(created.id)).status).toBe('expired');
         },
       ),
       { numRuns: 100 },

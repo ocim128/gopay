@@ -117,22 +117,22 @@ describe('extractCredential', () => {
 });
 
 describe('resolveApiKey', () => {
-  it('returns the record for an active key', () => {
+  it('returns the record for an active key', async () => {
     const storage = makeStorage([{ id: 'k1', key: ACTIVE_KEY }]);
-    const record = resolveApiKey(ACTIVE_KEY, storage);
+    const record = await resolveApiKey(ACTIVE_KEY, storage);
     expect(record?.id).toBe('k1');
   });
 
-  it('returns null for an unknown key', () => {
+  it('returns null for an unknown key', async () => {
     const storage = makeStorage([{ id: 'k1', key: ACTIVE_KEY }]);
-    expect(resolveApiKey('not-a-real-key', storage)).toBeNull();
+    expect(await resolveApiKey('not-a-real-key', storage)).toBeNull();
   });
 
-  it('returns null for a revoked key', () => {
+  it('returns null for a revoked key', async () => {
     const storage = makeStorage([
       { id: 'k2', key: REVOKED_KEY, status: 'revoked' },
     ]);
-    expect(resolveApiKey(REVOKED_KEY, storage)).toBeNull();
+    expect(await resolveApiKey(REVOKED_KEY, storage)).toBeNull();
   });
 });
 

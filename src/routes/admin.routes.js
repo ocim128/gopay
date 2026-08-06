@@ -225,17 +225,17 @@ function parsePaymentsPagination(query) {
  *     revokeApiKey: (id: string) => { ok: boolean, value?: object, code?: string },
  *   },
  *   configService: {
- *     getPollInterval: () => number,
- *     setPollInterval: (value: unknown) => number,
- *     getDefaultWebhookUrl: () => (string|null),
- *     setDefaultWebhookUrl: (value: unknown) => string,
- *     getStaticQris: () => (string|null),
- *     setStaticQris: (value: unknown) => string,
- *     getDisplayTimezone: () => string,
- *     setDisplayTimezone: (value: unknown) => string,
+ *     getPollInterval: () => Promise<number>,
+ *     setPollInterval: (value: unknown) => Promise<number>,
+ *     getDefaultWebhookUrl: () => Promise<(string|null)>,
+ *     setDefaultWebhookUrl: (value: unknown) => Promise<string>,
+ *     getStaticQris: () => Promise<(string|null)>,
+ *     setStaticQris: (value: unknown) => Promise<string>,
+ *     getDisplayTimezone: () => Promise<string>,
+ *     setDisplayTimezone: (value: unknown) => Promise<string>,
  *   },
  *   poller?: { setInterval?: (ms: number) => void },
- *   paymentService?: { getPayment: (id: string) => (object|null) },
+ *   paymentService?: { getPayment: (id: string) => Promise<(object|null)> },
  *   generateQrisImage?: (qrisString: string) => Promise<Buffer>,
  *   storage?: import('../dal/storage-interface.js').Storage,
  *   gobizClient?: { getRecentTransactions: (params: { days: number, size: number }) => Promise<object[]> },
@@ -288,14 +288,14 @@ export default async function adminRoutes(fastify, opts = {}) {
    * Snapshot the current Config as the response body shared by `GET` and the
    * update handler.
    *
-   * @returns {{ poll_interval: number, webhook_url: (string|null), static_qris: (string|null) }}
+   * @returns {Promise<{ poll_interval: number, webhook_url: (string|null), static_qris: (string|null), display_timezone: string }>}
    */
-  function currentConfig() {
+  async function currentConfig() {
     return {
-      poll_interval: configService.getPollInterval(),
-      webhook_url: configService.getDefaultWebhookUrl(),
-      static_qris: configService.getStaticQris(),
-      display_timezone: configService.getDisplayTimezone(),
+      poll_interval: await configService.getPollInterval(),
+      webhook_url: await configService.getDefaultWebhookUrl(),
+      static_qris: await configService.getStaticQris(),
+      display_timezone: await configService.getDisplayTimezone(),
     };
   }
 
@@ -338,14 +338,14 @@ export default async function adminRoutes(fastify, opts = {}) {
     // ── POST /admin/api-keys ────────────────────────────────────────────────
     // Create a key; the full value is revealed exactly once.
     protectedScope.post('/admin/api-keys', async (_request, reply) => {
-      const created = apiKeyManager.createApiKey();
+      const created = await apiKeyManager.createApiKey();
       return reply.code(201).send(created);
     });
 
     // ── GET /admin/api-keys ─────────────────────────────────────────────────
     // List keys in masked form only — never the hash or full value.
     protectedScope.get('/admin/api-keys', async (_request, reply) => {
-      return reply.code(200).send(apiKeyManager.listApiKeys());
+      return reply.code(200).send(await apiKeyManager.listApiKeys());
     });
 
     // ── POST /admin/api-keys/:id/revoke ─────────────────────────────────────
@@ -353,7 +353,7 @@ export default async function adminRoutes(fastify, opts = {}) {
     // and nothing is modified.
     protectedScope.post('/admin/api-keys/:id/revoke', async (request, reply) => {
       const { id } = request.params;
-      const result = apiKeyManager.revokeApiKey(id);
+      const result = await apiKeyManager.revokeApiKey(id);
       if (!result.ok) {
         return reply.code(404).send({
           error_code: result.code ?? 'KEY_NOT_REVOCABLE',
@@ -365,7 +365,7 @@ export default async function adminRoutes(fastify, opts = {}) {
 
     // ── GET /admin/config ───────────────────────────────────────────────────
     protectedScope.get('/admin/config', async (_request, reply) => {
-      return reply.code(200).send(currentConfig());
+      return reply.code(200).send(await currentConfig());
     });
 
     // ── PUT/POST /admin/config ──────────────────────────────────────────────
@@ -401,23 +401,23 @@ export default async function adminRoutes(fastify, opts = {}) {
 
       // All supplied values are valid: persist them.
       if (validated.poll_interval !== undefined) {
-        const stored = configService.setPollInterval(validated.poll_interval);
+        const stored = await configService.setPollInterval(validated.poll_interval);
         // Apply the new cadence immediately.
         if (poller && typeof poller.setInterval === 'function') {
           poller.setInterval(stored);
         }
       }
       if (validated.webhook_url !== undefined) {
-        configService.setDefaultWebhookUrl(validated.webhook_url);
+        await configService.setDefaultWebhookUrl(validated.webhook_url);
       }
       if (validated.static_qris !== undefined) {
-        configService.setStaticQris(validated.static_qris);
+        await configService.setStaticQris(validated.static_qris);
       }
       if (validated.display_timezone !== undefined) {
-        configService.setDisplayTimezone(validated.display_timezone);
+        await configService.setDisplayTimezone(validated.display_timezone);
       }
 
-      return reply.code(200).send(currentConfig());
+      return reply.code(200).send(await currentConfig());
     };
 
     protectedScope.put('/admin/config', updateConfig);
@@ -481,7 +481,7 @@ export default async function adminRoutes(fastify, opts = {}) {
     if (storage && storage.payments && typeof storage.payments.listHistory === 'function') {
       protectedScope.get('/admin/payments/history', async (request, reply) => {
         const { limit, offset } = parseHistoryPagination(request.query);
-        const payments = storage.payments.listHistory({ limit, offset });
+        const payments = await storage.payments.listHistory({ limit, offset });
         return reply.code(200).send(payments);
       });
     }
@@ -509,7 +509,7 @@ export default async function adminRoutes(fastify, opts = {}) {
           // Parse the YYYY-MM-DD wall-clock in the display timezone and produce
           // a [start-of-day, start-of-next-day) epoch-ms range, honouring the
           // zone's offset (and DST) for that date.
-          const tz = configService.getDisplayTimezone();
+          const tz = await configService.getDisplayTimezone();
           const [yStr, mStr, dStr] = dateStr.split('-');
           const y = Number(yStr);
           const mo = Number(mStr);
@@ -519,8 +519,8 @@ export default async function adminRoutes(fastify, opts = {}) {
           date = { start, end };
         }
 
-        const payments = storage.payments.listAll({ status, limit, offset, id, date });
-        const total = storage.payments.countAll({ status, id, date });
+        const payments = await storage.payments.listAll({ status, limit, offset, id, date });
+        const total = await storage.payments.countAll({ status, id, date });
         return reply.code(200).send({ payments, total, limit, offset });
       });
     }
@@ -535,11 +535,11 @@ export default async function adminRoutes(fastify, opts = {}) {
       typeof storage.webhookLogs.listByPayment === 'function'
     ) {
       protectedScope.get('/admin/payments/:id', async (request, reply) => {
-        const payment = storage.payments.getById(request.params.id);
+        const payment = await storage.payments.getById(request.params.id);
         if (!payment) {
           return reply.code(404).send(buildErrorResponse('PAYMENT_NOT_FOUND'));
         }
-        const webhookLogs = storage.webhookLogs.listByPayment(request.params.id);
+        const webhookLogs = await storage.webhookLogs.listByPayment(request.params.id);
         return reply.code(200).send({ ...payment, webhook_logs: webhookLogs });
       });
     }
@@ -559,7 +559,7 @@ export default async function adminRoutes(fastify, opts = {}) {
         typeof webhookDispatcher.dispatch === 'function')
     ) {
       protectedScope.post('/admin/payments/:id/webhook/resend', async (request, reply) => {
-        const payment = storage.payments.getById(request.params.id);
+        const payment = await storage.payments.getById(request.params.id);
         if (!payment) {
           return reply.code(404).send(buildErrorResponse('PAYMENT_NOT_FOUND'));
         }
@@ -741,7 +741,7 @@ export default async function adminRoutes(fastify, opts = {}) {
     // security note at the top of this file.
     if (paymentService && typeof paymentService.getPayment === 'function' && generateQrisImage) {
       protectedScope.get('/admin/payments/:id/qris.png', async (request, reply) => {
-        const payment = paymentService.getPayment(request.params.id);
+        const payment = await paymentService.getPayment(request.params.id);
         if (!payment) {
           return reply.code(404).send(buildErrorResponse('PAYMENT_NOT_FOUND'));
         }

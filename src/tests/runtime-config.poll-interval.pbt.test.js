@@ -39,25 +39,25 @@ describe('Property 34: Poll_Interval validation', () => {
     config = createConfigService(storage);
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
-  it('accepts and persists integers in 1000..60000', () => {
-    fc.assert(
-      fc.property(
+  it('accepts and persists integers in 1000..60000', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.integer({ min: POLL_INTERVAL_MIN_MS, max: POLL_INTERVAL_MAX_MS }),
-        (valid) => {
+        async (valid) => {
           // setPollInterval returns the stored integer and getPollInterval reads it back.
-          expect(config.setPollInterval(valid)).toBe(valid);
-          expect(config.getPollInterval()).toBe(valid);
+          expect(await config.setPollInterval(valid)).toBe(valid);
+          expect(await config.getPollInterval()).toBe(valid);
         },
       ),
       { numRuns: NUM_RUNS },
     );
   });
 
-  it('rejects out-of-range / non-integer values with HTTP 400 and retains the previous value', () => {
+  it('rejects out-of-range / non-integer values with HTTP 400 and retains the previous value', async () => {
     // Generators for the invalid input space: below the minimum, above the
     // maximum, non-integer (fractional) numbers, NaN, and non-numeric strings.
     const belowMin = fc.integer({ min: -1_000_000, max: POLL_INTERVAL_MIN_MS - 1 });
@@ -72,14 +72,14 @@ describe('Property 34: Poll_Interval validation', () => {
 
     const invalid = fc.oneof(belowMin, aboveMax, nonInteger, nan, nonNumericString);
 
-    fc.assert(
-      fc.property(invalid, (bad) => {
+    await fc.assert(
+      fc.asyncProperty(invalid, async (bad) => {
         // Seed a known valid value so the retain guarantee is observable.
-        config.setPollInterval(SEED_POLL_INTERVAL);
+        await config.setPollInterval(SEED_POLL_INTERVAL);
 
         let thrown;
         try {
-          config.setPollInterval(bad);
+          await config.setPollInterval(bad);
         } catch (err) {
           thrown = err;
         }
@@ -89,7 +89,7 @@ describe('Property 34: Poll_Interval validation', () => {
         expect(thrown.http).toBe(400);
 
         // The previously stored value is retained unchanged (nothing written).
-        expect(config.getPollInterval()).toBe(SEED_POLL_INTERVAL);
+        expect(await config.getPollInterval()).toBe(SEED_POLL_INTERVAL);
       }),
       { numRuns: NUM_RUNS },
     );

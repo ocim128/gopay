@@ -81,16 +81,16 @@ describe('Shared_Poller singleton wiring', () => {
       sessionSecret: 'test-secret',
       seedAdmin: false,
     });
-    app.configService.setStaticQris(VALID_STATIC_QRIS);
+    await app.configService.setStaticQris(VALID_STATIC_QRIS);
 
     // The single injected poller is the one exposed by the server.
     expect(app.poller).toBe(fakePoller);
 
     // Many payments -> ensureRunning is called on the SAME instance each time;
     // no new poller is ever constructed.
-    app.paymentService.createPayment({ mode: 'client', amount: 1000 });
-    app.paymentService.createPayment({ mode: 'client', amount: 2000 });
-    app.paymentService.createPayment({ mode: 'client', amount: 3000 });
+    await app.paymentService.createPayment({ mode: 'client', amount: 1000 });
+    await app.paymentService.createPayment({ mode: 'client', amount: 2000 });
+    await app.paymentService.createPayment({ mode: 'client', amount: 3000 });
 
     expect(fakePoller.ensureRunningCount).toBe(3);
     expect(app.poller).toBe(fakePoller);
@@ -103,7 +103,7 @@ describe('Shared_Poller singleton wiring', () => {
       sessionSecret: 'test-secret',
       seedAdmin: false,
     });
-    app.configService.setStaticQris(VALID_STATIC_QRIS);
+    await app.configService.setStaticQris(VALID_STATIC_QRIS);
 
     // buildServer constructs exactly one Shared_Poller.
     expect(app.poller).toBeInstanceOf(SharedPoller);
@@ -112,8 +112,8 @@ describe('Shared_Poller singleton wiring', () => {
     // The Payment_Service ensureRunning hook reaches that one instance.
     const ensureRunningSpy = vi.spyOn(theOnlyPoller, 'ensureRunning');
 
-    app.paymentService.createPayment({ mode: 'client', amount: 4000 });
-    app.paymentService.createPayment({ mode: 'client', amount: 5000 });
+    await app.paymentService.createPayment({ mode: 'client', amount: 4000 });
+    await app.paymentService.createPayment({ mode: 'client', amount: 5000 });
 
     expect(ensureRunningSpy).toHaveBeenCalledTimes(2);
     // The poller reference never changes: it is a singleton.

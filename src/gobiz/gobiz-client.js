@@ -163,11 +163,14 @@ export class GoBizClient {
       `[GoBizClient] Using merchant: ${merchantName} (ID: ${merchantId})`,
     );
 
-    // Auto-sync Static QRIS to the global config store if possible.
+    // Auto-sync Static QRIS to the global config store if possible. The Config
+    // Service writes through the (async) DAL, so this is awaited: a failure must
+    // be caught here rather than becoming an unhandled rejection, and the
+    // success log must only fire once the write is durable.
     const qrisString = first.pops?.[0]?.gopay?.aspi_qr_string;
     if (qrisString && typeof this.config?.setStaticQris === 'function') {
       try {
-        this.config.setStaticQris(qrisString);
+        await this.config.setStaticQris(qrisString);
         this.logger?.log?.('[GoBizClient] Auto-synced Static QRIS to config store.');
       } catch (err) {
         this.logger?.warn?.(`[GoBizClient] Failed to auto-sync Static QRIS: ${err.message}`);

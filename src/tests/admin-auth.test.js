@@ -71,8 +71,8 @@ describe('createAdminAuth', () => {
     auth = createAdminAuth(storage, { now: () => clock, secret: SECRET });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
     for (const suffix of ['', '-wal', '-shm']) {
       rmSync(`${dbPath}${suffix}`, { force: true });
     }
@@ -109,8 +109,8 @@ describe('createAdminAuth', () => {
       expect(result.cookie).toContain(`Max-Age=${SESSION_TTL_MS / 1000}`);
     });
 
-    it('stores only a password hash, never the plaintext', () => {
-      const stored = storage.adminUsers.getByUsername(USERNAME);
+    it('stores only a password hash, never the plaintext', async () => {
+      const stored = await storage.adminUsers.getByUsername(USERNAME);
       expect(stored.password_hash).not.toBe(PASSWORD);
       expect(stored.password_hash.startsWith('scrypt$')).toBe(true);
     });
@@ -118,10 +118,10 @@ describe('createAdminAuth', () => {
     it('clears the failure counters on success', async () => {
       await auth.login(USERNAME, 'wrong', '127.0.0.1');
       await auth.login(USERNAME, 'wrong', '127.0.0.1');
-      expect(storage.loginAttempts.getByIp('127.0.0.1').failedAttempts).toBe(2);
+      expect((await storage.loginAttempts.getByIp('127.0.0.1')).failedAttempts).toBe(2);
 
       await auth.login(USERNAME, PASSWORD, '127.0.0.1');
-      const after = storage.loginAttempts.getByIp('127.0.0.1');
+      const after = await storage.loginAttempts.getByIp('127.0.0.1');
       expect(after.failedAttempts).toBe(0);
       expect(after.lockoutUntil).toBeNull();
     });
@@ -160,7 +160,7 @@ describe('createAdminAuth', () => {
           expect(r.code).toBe(ADMIN_AUTH_ERRORS.ACCOUNT_LOCKED);
         }
       }
-      expect(storage.loginAttempts.getByIp('10.0.0.1').failedAttempts).toBe(5);
+      expect((await storage.loginAttempts.getByIp('10.0.0.1')).failedAttempts).toBe(5);
     });
   });
 
@@ -183,7 +183,7 @@ describe('createAdminAuth', () => {
 
     it('does not record a failure for an empty submission', async () => {
       await auth.login(USERNAME, '', '127.0.0.1');
-      expect(storage.loginAttempts.getByIp('127.0.0.1')).toBeNull();
+      expect(await storage.loginAttempts.getByIp('127.0.0.1')).toBeNull();
     });
   });
 
@@ -195,7 +195,7 @@ describe('createAdminAuth', () => {
         expect(r.code).toBe(ADMIN_AUTH_ERRORS.INVALID_CREDENTIALS);
         clock += 1000; // each attempt a second apart, well inside the window
       }
-      expect(storage.loginAttempts.isLockedOut('127.0.0.1', clock)).toBe(true);
+      expect(await storage.loginAttempts.isLockedOut('127.0.0.1', clock)).toBe(true);
 
       // Even the correct password is refused while blocked.
       const blocked = await auth.login(USERNAME, PASSWORD, '127.0.0.1');
@@ -227,7 +227,7 @@ describe('createAdminAuth', () => {
         await auth.login(USERNAME, 'wrong', '127.0.0.1');
         clock += LOGIN_FAILURE_WINDOW_MS + 1;
       }
-      expect(storage.loginAttempts.isLockedOut('127.0.0.1', clock)).toBe(false);
+      expect(await storage.loginAttempts.isLockedOut('127.0.0.1', clock)).toBe(false);
       const ok = await auth.login(USERNAME, PASSWORD, '127.0.0.1');
       expect(ok.ok).toBe(true);
     });

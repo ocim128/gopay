@@ -114,21 +114,21 @@ describe('findFreeSuffix', () => {
 });
 
 describe('allocateServerAmount', () => {
-  it('returns the first candidate that the attempt accepts', () => {
-    const result = allocateServerAmount(10_000, () => true);
+  it('returns the first candidate that the attempt accepts', async () => {
+    const result = await allocateServerAmount(10_000, () => true);
     expect(result).toEqual({ amount: 10_000, suffix: 0, result: true });
   });
 
-  it('skips taken candidates and returns the first free one', () => {
+  it('skips taken candidates and returns the first free one', async () => {
     const used = new Set([10_000, 10_001, 10_002]);
-    const result = allocateServerAmount(10_000, (candidate) => !used.has(candidate));
+    const result = await allocateServerAmount(10_000, (candidate) => !used.has(candidate));
     expect(result.amount).toBe(10_003);
     expect(result.suffix).toBe(3);
   });
 
-  it('passes both the candidate amount and the suffix to the attempt', () => {
+  it('passes both the candidate amount and the suffix to the attempt', async () => {
     const seen = [];
-    allocateServerAmount(1000, (candidate, suffix) => {
+    await allocateServerAmount(1000, (candidate, suffix) => {
       seen.push([candidate, suffix]);
       return suffix === 2;
     });
@@ -139,17 +139,17 @@ describe('allocateServerAmount', () => {
     ]);
   });
 
-  it('returns the truthy result object from the attempt', () => {
+  it('returns the truthy result object from the attempt', async () => {
     const row = { id: 'p_1' };
-    const result = allocateServerAmount(7_000, () => row);
+    const result = await allocateServerAmount(7_000, () => row);
     expect(result.result).toBe(row);
   });
 
-  it('throws NO_AVAILABLE_AMOUNT when every slot is taken', () => {
+  it('throws NO_AVAILABLE_AMOUNT when every slot is taken', async () => {
     let attempts = 0;
     let error;
     try {
-      allocateServerAmount(10_000, () => {
+      await allocateServerAmount(10_000, () => {
         attempts += 1;
         return false;
       });
@@ -161,11 +161,11 @@ describe('allocateServerAmount', () => {
     expect(attempts).toBe(SUFFIX_SLOTS);
   });
 
-  it('respects a custom maxAttempts budget', () => {
+  it('respects a custom maxAttempts budget', async () => {
     let attempts = 0;
     let error;
     try {
-      allocateServerAmount(
+      await allocateServerAmount(
         10_000,
         () => {
           attempts += 1;
@@ -181,11 +181,11 @@ describe('allocateServerAmount', () => {
     expect(attempts).toBe(5);
   });
 
-  it('stops before forming an amount above the maximum', () => {
+  it('stops before forming an amount above the maximum', async () => {
     let attempts = 0;
     let error;
     try {
-      allocateServerAmount(MAX_AMOUNT, () => {
+      await allocateServerAmount(MAX_AMOUNT, () => {
         attempts += 1;
         return false;
       });
@@ -197,7 +197,7 @@ describe('allocateServerAmount', () => {
     expect(error.code).toBe('NO_AVAILABLE_AMOUNT');
   });
 
-  it('throws a TypeError when the attempt is not a function', () => {
-    expect(() => allocateServerAmount(10_000, null)).toThrow(TypeError);
+  it('throws a TypeError when the attempt is not a function', async () => {
+    await expect(allocateServerAmount(10_000, null)).rejects.toThrow(TypeError);
   });
 });

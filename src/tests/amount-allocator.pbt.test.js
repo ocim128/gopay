@@ -45,12 +45,12 @@ const usedSuffixesArb = fc.oneof(
 );
 
 describe('Property 9: Unique_Suffix allocation (server-managed)', () => {
-  it('allocates a free, in-range suffix while one remains, else NO_AVAILABLE_AMOUNT', () => {
-    fc.assert(
-      fc.property(
+  it('allocates a free, in-range suffix while one remains, else NO_AVAILABLE_AMOUNT', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.integer({ min: 1000, max: MAX_BASE_AMOUNT }),
         usedSuffixesArb,
-        (baseAmount, usedList) => {
+        async (baseAmount, usedList) => {
           const used = new Set(usedList);
 
           // The attempt callback emulates the real DAL UNIQUE constraint: a
@@ -64,7 +64,7 @@ describe('Property 9: Unique_Suffix allocation (server-managed)', () => {
             // NO_AVAILABLE_AMOUNT and yield no Amount.
             let error;
             try {
-              allocateServerAmount(baseAmount, attempt);
+              await allocateServerAmount(baseAmount, attempt);
             } catch (e) {
               error = e;
             }
@@ -77,7 +77,7 @@ describe('Property 9: Unique_Suffix allocation (server-managed)', () => {
 
           // A free slot remains: allocation must return Amount = Base_Amount +
           // suffix with a suffix in 0..999 that is not in the used set.
-          const { amount, suffix } = allocateServerAmount(baseAmount, attempt);
+          const { amount, suffix } = await allocateServerAmount(baseAmount, attempt);
 
           expect(Number.isInteger(suffix)).toBe(true);
           expect(suffix).toBeGreaterThanOrEqual(MIN_SUFFIX);

@@ -103,9 +103,9 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
   /** @type {ReturnType<typeof createSqliteStorage>} */
   let storage;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = undefined;
     }
   });
@@ -115,7 +115,7 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
     storage = createSqliteStorage({ dbPath: ':memory:' });
 
     const config = createConfigService(storage);
-    config.setStaticQris(VALID_STATIC_QRIS);
+    await config.setStaticQris(VALID_STATIC_QRIS);
 
     const transport = makeStubTransport();
     const webhookLogs = makeRecordingWebhookLogs(storage.webhookLogs);
@@ -158,13 +158,13 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
     const gobizClient = makeStubGoBizClient([stubTx]);
 
     poller = new SharedPoller(gobizClient, {
-      getActiveCount: () => storage.payments.countActive(),
+      getActiveCount: async () => storage.payments.countActive(),
       onTransactions: (txs) => paymentService.handleTransactions(txs),
-      getPollInterval: () => config.getPollInterval(),
+      getPollInterval: async () => config.getPollInterval(),
     });
 
     // ---- 1. Create a payment: it starts pending -----------------------------
-    const created = paymentService.createPayment({
+    const created = await paymentService.createPayment({
       mode: 'client',
       amount: PAID_AMOUNT,
       webhook_url: WEBHOOK_URL,
@@ -184,7 +184,7 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
     expect(gobizClient.getRecentTransactions).toHaveBeenCalledTimes(1);
 
     // ---- 3. The payment transitioned pending -> paid ---------
-    const settled = paymentService.getPayment(created.id);
+    const settled = await paymentService.getPayment(created.id);
     expect(settled.status).toBe('paid');
     expect(settled.tx_id).toBe(stubTx.txId);
     expect(settled.paid_amount).toBe(PAID_AMOUNT);

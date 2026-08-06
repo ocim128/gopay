@@ -37,6 +37,43 @@ const WRONG_PASSWORD = 'definitely-not-the-password';
 const TEST_TIMEOUT_MS = 180_000;
 
 /**
+ * Apply the fixed-window login failure policy, mirroring the production DAL's
+ * `applyFailurePolicy`. Given the previous state (if any) and a policy
+ * `{ now, windowMs, threshold, lockoutMs }`, compute the next
+ * `{ failedAttempts, lockoutUntil }`.
+ *
+ * @param {{ failedAttempts: number, lockoutUntil: number|null }|null} state
+ * @param {{ now: number, windowMs: number, threshold: number, lockoutMs: number }} policy
+ * @returns {{ failedAttempts: number, lockoutUntil: number|null }}
+ */
+function applyFailurePolicy(state, policy) {
+  const { now, windowMs, threshold, lockoutMs } = policy;
+  const prevAttempts = state ? state.failedAttempts : 0;
+  const prevUntil = state ? state.lockoutUntil : null;
+
+  const withinOpenWindow =
+    prevUntil !== null &&
+    now < prevUntil &&
+    prevAttempts > 0 &&
+    prevAttempts < threshold;
+
+  let failedAttempts;
+  let windowEnd;
+  if (withinOpenWindow) {
+    failedAttempts = prevAttempts + 1;
+    windowEnd = prevUntil; // keep the fixed window from the first failure
+  } else {
+    failedAttempts = 1;
+    windowEnd = now + windowMs;
+  }
+
+  const lockoutUntil =
+    failedAttempts >= threshold ? now + lockoutMs : windowEnd;
+
+  return { failedAttempts, lockoutUntil };
+}
+
+/**
  * An in-memory `adminUsers` store for a single seeded admin. It implements the
  * exact subset of the DAL contract that createAdminAuth depends on and mirrors
  * the SQLite isLockedOut semantics (threshold AND future deadline).
@@ -65,9 +102,11 @@ function createFakeStorage(username, passwordHash) {
       const state = loginState.get(ipAddress);
       return state ? { ...state } : null;
     },
-    recordFailure(ipAddress, state) {
-      loginState.set(ipAddress, { ...state });
-      return { ok: true };
+    recordFailure(ipAddress, policy) {
+      const prev = loginState.get(ipAddress);
+      const next = applyFailurePolicy(prev, policy);
+      loginState.set(ipAddress, next);
+      return { ok: true, value: next };
     },
     resetFailures(ipAddress) {
       loginState.delete(ipAddress);

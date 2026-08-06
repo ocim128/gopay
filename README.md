@@ -114,9 +114,10 @@ flowchart LR
 
 ## Requirements
 
-- **Node.js ≥ 18** (the panel runs under PM2 with `--env-file`, which needs **Node ≥ 20.6**).
+- **Node.js ≥ 20.19.0** (the MongoDB driver requires ≥ 20.19; PM2's `--env-file` flag needs ≥ 20.6). Pin a 20.x LTS minor at or above this in your deployment runtime.
 - A working **GoPay Merchant (GoBiz)** account — email + password.
 - Your merchant **static QRIS string** (configured later from the panel, not the env file).
+- **Storage backend**: SQLite (default, no extra service) or MongoDB (Atlas or self-hosted) when `STORAGE_BACKEND=mongodb`. See [Storage backend](#storage-backend).
 
 ---
 
@@ -178,10 +179,61 @@ from **API Keys** and put it in `panel/.env` as `PANEL_API_KEY`.
 | `ADMIN_PASSWORD` | seed | Admin password, seeded (hashed) on first boot. |
 | `PORT` | optional | Backend listen port (default `3000`). |
 | `HOST` | optional | Backend bind host (default `0.0.0.0`). |
-| `DB_PATH` | optional | SQLite database path (default under `data/`). |
+| `DB_PATH` | optional | SQLite database path (default under `data/`). Used only when `STORAGE_BACKEND=sqlite` (the default). |
 | `TOKEN_FILE_PATH` | optional | Encrypted GoBiz token path (default `.gopay_token.enc`). |
+| `STORAGE_BACKEND` | optional | Storage backend: `sqlite` (default) or `mongodb`. See [Storage backend](#storage-backend). |
+| `MONGODB_URI` | mongodb only | MongoDB connection string with a dedicated database name. Required when `STORAGE_BACKEND=mongodb`; ignored otherwise. Never logged. |
 | `NODE_ENV` | optional | When `production`, marks the admin session cookie `Secure` (HTTPS only). Leave unset to allow plain `http://IP:port`. |
 | `TZ` | optional | Process timezone for local-time formatting (PM2 pins `Asia/Jakarta`). Stored timestamps stay UTC epoch ms. |
+
+### Storage backend
+
+The backend persists its data through a single storage-agnostic Data Access
+Layer (DAL). Two backends are supported:
+
+- **SQLite** (default, `STORAGE_BACKEND=sqlite`) — a single file at `DB_PATH`,
+  powered by `better-sqlite3` in WAL mode. The simplest option; no extra
+  services required. Cannot scale horizontally.
+- **MongoDB** (`STORAGE_BACKEND=mongodb`) — the official `mongodb` driver
+  against an Atlas (or self-hosted) cluster. Required for horizontal scaling
+  and to avoid attaching a persistent disk for database state.
+
+```env
+# SQLite (default)
+STORAGE_BACKEND=sqlite
+DB_PATH=data/panel.db
+
+# MongoDB
+STORAGE_BACKEND=mongodb
+MONGODB_URI=mongodb+srv://gopay-user:strong-password@cluster.example/gopay
+```
+
+Rules:
+
+- `STORAGE_BACKEND` accepts `sqlite` or `mongodb` and defaults to `sqlite`.
+- `MONGODB_URI` is required for `mongodb` and **must include an explicit
+  database name** (the trailing `/gopay` above). Gopay must use its own
+  database and a least-privilege database user; it may share an Atlas cluster
+  with another app, but not its database or user.
+- MongoDB selection **never falls back to SQLite** after an error: if Atlas is
+  unreachable at startup the process fails fast rather than silently switching
+  backends. Readiness is reported through `/health/ready`.
+- Configure Atlas network access to allow only this service's outbound IP/CIDR.
+- Keep the first production rollout at **one instance**: the poller is
+  process-local. Atomic storage operations (`markPaid`, expiry,
+  `adminUsers.ensure`, login-failure counting) still tolerate the brief
+  old/new instance overlap during deployment.
+
+The MongoDB contract test suite runs only when a `MONGODB_URI_TEST`
+environment variable points at a test cluster:
+
+```bash
+MONGODB_URI_TEST="mongodb://localhost:27017/gopay_test_main" \
+  npx vitest --run src/tests/mongo-storage.contract.test.js
+```
+
+It generates a uniquely-named database per run (`gopay_test_<uuid>`) and
+refuses to drop any database whose name does not match that pattern.
 
 ### Panel — `panel/.env`
 
@@ -211,7 +263,10 @@ from **API Keys** and put it in `panel/.env` as `PANEL_API_KEY`.
 
 The repository includes [render.yaml](./render.yaml) for deploying the
 backend API as a Render Web Service. It uses Render's injected PORT, binds
-to 0.0.0.0, and exposes GET /health for Render health checks.
+to 0.0.0.0, and points Render's health check at `GET /health/ready`, which
+runs a bounded `storage.ping()` and reports 503 when the selected backend is
+unreachable. (`/health/live` is also available for liveness probes and always
+returns 200 while the process is up.)
 
 The Blueprint is configured for the Free plan so it can be used for an initial
 deployment test. Render Free services are not suitable for real payments:
@@ -219,7 +274,18 @@ they sleep after inactivity and their local filesystem is ephemeral. This
 service stores payment state in SQLite and the GoBiz access token on disk, so
 data can be lost after a restart, redeploy, or sleep.
 
-For a paid Render deployment:
+**Choose a backend** (see [Storage backend](#storage-backend)):
+
+- **SQLite production** (`STORAGE_BACKEND=sqlite`, the default) needs a paid
+  service with a persistent disk. Put `DB_PATH` and `TOKEN_FILE_PATH` under
+  the disk mount. It cannot scale horizontally.
+- **MongoDB production** (`STORAGE_BACKEND=mongodb` with `MONGODB_URI`) uses
+  Atlas and does not need a disk for database state. `TOKEN_FILE_PATH` still
+  needs either persistent storage or a tested reauthentication path after the
+  ephemeral token file is lost. Keep the rollout at one instance (the poller
+  is process-local).
+
+For a paid SQLite Render deployment:
 
 1. Upgrade the service to a paid instance.
 2. Attach a persistent disk mounted at /var/lib/gopay.
@@ -229,8 +295,17 @@ For a paid Render deployment:
 4. Set all secret variables from render.yaml in the Render dashboard.
 5. Use the resulting HTTPS service URL as the backend URL in AutoBeli.
 
+For a MongoDB Render deployment, set `STORAGE_BACKEND=mongodb` and `MONGODB_URI`
+(an Atlas connection string with a dedicated database name) instead of attaching
+a disk. Configure the Atlas network allowlist for Render's outbound CIDR or a
+dedicated outbound IP.
+
 The admin panel is not included in the Render Blueprint. Keep it private or
 deploy it as a separate service; AutoBeli only needs the backend API.
+
+On `SIGTERM` / `SIGINT` the process drains gracefully: it stops the poller and
+closes the storage backend (idempotently), so shutdown never leaves a dangling
+connection or a half-written batch.
 
 Two supported topologies. Both run the **backend** (`gopay-api`, port `3000`) and
 the **panel** (`gopay-panel`, port `3001`) under PM2. The panel reaches the
@@ -369,11 +444,14 @@ Now the panel is at `https://panel.example.com` and the REST API at
 
 `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `.env` only **seed** the admin on first
 boot (when that user does not exist yet). Afterwards the credentials live as a
-scrypt hash in `data/panel.db`, so editing `.env` has no effect. Use the bundled
-utility to change them (run from the repo root):
+scrypt hash in the configured storage backend (SQLite file or MongoDB), so
+editing `.env` has no effect. Use the bundled utility to change them (run from
+the repo root). The tool talks to the storage layer through the DAL, so the
+**same commands work on both backends**; it auto-selects the backend from
+`STORAGE_BACKEND`/`DB_PATH`/`MONGODB_URI` the same way the server does.
 
 ```bash
-# List existing admins (and lock state)
+# List existing admins
 node scripts/manage-admin.mjs --list
 
 # Change password
@@ -388,6 +466,20 @@ node scripts/manage-admin.mjs --user admin --new-username newname --password 'ne
 # Create the admin if it does not exist yet
 node scripts/manage-admin.mjs --user admin --password 'new-strong-password' --create
 ```
+
+A credential change also clears every IP-based login lockout, so an account
+that got rate-limited can be unlocked by resetting its password.
+
+For a MongoDB deployment, point the tool at the cluster explicitly when the
+server env vars are not on the path:
+
+```bash
+node scripts/manage-admin.mjs --backend mongodb \
+  --mongo-uri "$MONGODB_URI" --list
+```
+
+On SQLite you can override the database path with `--db <path>` (defaults to
+`$DB_PATH` or `data/panel.db`).
 
 The password is hashed with the app's own scrypt encoder (login-compatible), and
 every update also clears failed-attempt/lockout counters (handy to unlock a

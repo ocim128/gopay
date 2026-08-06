@@ -16,30 +16,32 @@ describe('Payment_Service onCreated hook', () => {
   /** @type {ReturnType<typeof createPaymentService>} */
   let service;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
     createdEvents = [];
     service = createPaymentService({
       storage,
-      config: { getStaticQris: () => STATIC_QRIS },
+      config: { getStaticQris: async () => STATIC_QRIS },
       onCreated: (payment) => createdEvents.push(payment)
     });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
-  it('fires once with the stored pending payment after a successful create', () => {
-    const payment = service.createPayment({ mode: PAYMENT_MODE.CLIENT, amount: 12345 });
+  it('fires once with the stored pending payment after a successful create', async () => {
+    const payment = await service.createPayment({ mode: PAYMENT_MODE.CLIENT, amount: 12345 });
 
     expect(createdEvents).toHaveLength(1);
     expect(createdEvents[0].id).toBe(payment.id);
     expect(createdEvents[0].status).toBe('pending');
   });
 
-  it('does not fire when creation fails (invalid amount)', () => {
-    expect(() => service.createPayment({ mode: PAYMENT_MODE.CLIENT, amount: -1 })).toThrow();
+  it('does not fire when creation fails (invalid amount)', async () => {
+    await expect(service.createPayment({ mode: PAYMENT_MODE.CLIENT, amount: -1 })).rejects.toThrow();
+    // The hook never fires because the rejection happens before the
+    // insert/onCreated step.
     expect(createdEvents).toHaveLength(0);
   });
 });

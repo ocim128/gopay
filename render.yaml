@@ -4,18 +4,40 @@
 # Node service and is not required for AutoBeli-to-API integration.
 #
 # The free plan is suitable for deployment testing only: Render free services
-# sleep when idle and have ephemeral storage. For real payments, upgrade this
-# service and attach a persistent disk, then set DB_PATH and TOKEN_FILE_PATH
-# to paths on that disk.
+# sleep when idle and have ephemeral storage.
+#
+# Storage backends:
+#
+#   SQLite (default) — set STORAGE_BACKEND=sqlite (or omit it) on a PAID service
+#     with a persistent disk, and put DB_PATH and TOKEN_FILE_PATH on that disk.
+#     SQLite cannot scale horizontally. The blueprint below shows the disk
+#     configuration commented out; enable it for a real SQLite deployment.
+#
+#   MongoDB — set STORAGE_BACKEND=mongodb and MONGODB_URI (an Atlas connection
+#     string with a dedicated database name and a least-privilege user). MongoDB
+#     production does NOT need a disk for database state, but TOKEN_FILE_PATH
+#     still needs either persistent storage or a tested reauthentication path.
+#     Keep the first production rollout at ONE instance (the poller is
+#     process-local); atomic storage operations still tolerate the brief
+#     old/new instance overlap during deployment.
+#
+# Render's health check points at /health/ready, which calls storage.ping()
+# with a bounded timeout so a deploying or unhealthy instance stops receiving
+# traffic until the backend is reachable.
 
 services:
   - type: web
     name: gopay-api
     runtime: node
+    # Pin a Node 20 LTS minor at or above 20.19.0. The `mongodb` driver
+    # (STORAGE_BACKEND=mongodb) requires >=20.19.0; the panel's PM2 --env-file
+    # flag needs >=20.6. Render's `nodeVersion` accepts a major ("20") or a
+    # major.minor; pin the major here and let Render's 20.x track satisfy it.
+    nodeVersion: "20.19.0"
     plan: free
     buildCommand: npm ci
     startCommand: npm start
-    healthCheckPath: /health
+    healthCheckPath: /health/ready
     autoDeploy: true
     envVars:
       - key: NODE_ENV
@@ -24,6 +46,10 @@ services:
         value: 0.0.0.0
       - key: TZ
         value: Asia/Jakarta
+
+      # Storage backend selection. Either `sqlite` (default) or `mongodb`.
+      - key: STORAGE_BACKEND
+        value: sqlite
 
       # Configure these as secrets in Render. They are intentionally not
       # included as literal values in this repository.
@@ -41,3 +67,23 @@ services:
         sync: false
       - key: ADMIN_SESSION_SECRET
         sync: false
+
+      # SQLite only: the database file path. For a paid Render service with a
+      # disk mounted at /var/lib/gopay, set this under the disk mount.
+      - key: DB_PATH
+        sync: false
+      # Path to the encrypted GoBiz token file. Same disk guidance as DB_PATH.
+      - key: TOKEN_FILE_PATH
+        sync: false
+
+      # MongoDB only (required when STORAGE_BACKEND=mongodb). Atlas connection
+      # string with a dedicated database name and least-privilege user.
+      - key: MONGODB_URI
+        sync: false
+
+# SQLite production deployment: attach a persistent disk and put DB_PATH /
+# TOKEN_FILE_PATH under the disk mount. Uncomment and adjust for a paid service.
+# disks:
+#   - name: gopay-data
+#     mountPath: /var/lib/gopay
+#     sizeGB: 1

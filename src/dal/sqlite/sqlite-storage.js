@@ -6,12 +6,21 @@
 // JavaScript values across the DAL boundary — no statement, row class, or
 // PRAGMA detail leaks out.
 //
+// Every method is `async` and returns a Promise, even though better-sqlite3 is
+// synchronous internally. This matches the storage contract's `Awaitable<T>`
+// return types so the same callers work unchanged against the asynchronous
+// MongoDB adapter.
+//
 // This module implements the full `Storage` contract: the `payments` store
 // (`insertPending`, `getById`, `listActive`, `markPaid`, `expireOverdue`,
-// `countActive`), the `apiKeys` store (`create`, `getActiveByHash`, `revoke`,
-// `listMasked`), the `webhookLogs` store (`append`, `markPermanentFailure`,
-// `listByPayment`), the `adminUsers` store, the `config` store (`get`/`set`),
-// and the atomic `tx(fn)` helper.
+// `expireOverdueReturning`, `countActive`, `findCandidatesByAmount`,
+// `maxActiveTolerance`, `listHistory`, `listAll`, `countAll`), the `apiKeys`
+// store (`create`, `getActiveByHash`, `revoke`, `listMasked`), the
+// `webhookLogs` store (`append`, `markPermanentFailure`, `listByPayment`,
+// `pruneOld`), the `adminUsers` store (`getByUsername`, `ensure`), the
+// `loginAttempts` store (atomic `recordFailure(ip, policy)`,
+// `resetFailures`, `isLockedOut`, `getByIp`), the `config` store
+// (`get`/`set`), and the top-level `ping()` and `close()`.
 //
 // Race-condition strategy: amount uniqueness among pending
 // payments is enforced by the partial unique index `uniq_pending_amount` at
@@ -23,7 +32,17 @@
 // transaction, so a txId can settle at most one payment and a re-used txId
 // aborts the whole settlement.
 
+import { randomUUID } from 'node:crypto';
+
 import { openDatabase } from './db.js';
+
+// Login-failure policy defaults. The Admin_Auth layer passes the authoritative
+// values through the `recordFailure(ip, policy)` call; these mirror them and
+// back the `isLockedOut` predicate, which must tell an active block apart from
+// an open (still-counting) failure window.
+const DEFAULT_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const DEFAULT_LOGIN_THRESHOLD = 5;
+const DEFAULT_LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
 
 /**
  * Default page size for `listActive` when no limit is supplied, and the maximum
@@ -42,17 +61,6 @@ const MAX_LIST_LIMIT = 100;
  * @type {number}
  */
 const DEFAULT_HISTORY_LIMIT = 50;
-
-/**
- * Number of failed login attempts at or above which an admin account is
- * considered blocked. This mirrors the escalation threshold
- * the Admin_Auth layer applies when computing `lockout_until`; it lives here as
- * well because the DAL's `adminUsers.isLockedOut` predicate must tell an active
- * 15-minute block apart from an open (still-counting) failure window.
- *
- * @type {number}
- */
-const ADMIN_LOCKOUT_THRESHOLD = 5;
 
 /**
  * Determine whether a thrown error is a SQLite UNIQUE-constraint violation. The
@@ -136,10 +144,50 @@ function normalizeHistoryOptions(options = {}) {
 }
 
 /**
- * A sentinel thrown inside the `markPaid` transaction to roll it back when the
- * target payment is not in a settleable (`pending`) state. Carrying a stable
- * `code` lets the outer handler translate it to a Result without inspecting
- * message strings.
+ * Apply the fixed-window login-failure policy to the previous state and the
+ * current attempt, mirroring the Admin_Auth layer's semantics. The first
+ * failure opens a window ending at `now + windowMs`. Failures that arrive while
+ * that window is still open increment the count without extending the window.
+ * Once the count reaches the threshold the state escalates to a hard block
+ * ending at `now + lockoutMs`. A failure that arrives after the previous
+ * window/block has elapsed starts a fresh window.
+ *
+ * @param {{ failedAttempts: number, lockoutUntil: number|null }|null} state
+ * @param {import('../storage-interface.js').LoginFailurePolicy} policy
+ * @returns {{ failedAttempts: number, lockoutUntil: number|null }}
+ */
+function applyFailurePolicy(state, policy) {
+  const { now, windowMs, threshold, lockoutMs } = policy;
+  const prevAttempts = state ? state.failedAttempts : 0;
+  const prevUntil = state ? state.lockoutUntil : null;
+
+  const withinOpenWindow =
+    prevUntil !== null &&
+    now < prevUntil &&
+    prevAttempts > 0 &&
+    prevAttempts < threshold;
+
+  let failedAttempts;
+  let windowEnd;
+  if (withinOpenWindow) {
+    failedAttempts = prevAttempts + 1;
+    windowEnd = prevUntil; // keep the fixed window from the first failure
+  } else {
+    failedAttempts = 1;
+    windowEnd = now + windowMs;
+  }
+
+  const lockoutUntil =
+    failedAttempts >= threshold ? now + lockoutMs : windowEnd;
+
+  return { failedAttempts, lockoutUntil };
+}
+
+/**
+ * A sentinel thrown inside the {@link markPaid} transaction to roll it back
+ * when the target payment is not in a settleable (`pending`) state. Carrying a
+ * stable `code` lets the outer handler translate it to a Result without
+ * inspecting message strings.
  */
 class SettlementAbort extends Error {
   /** @param {string} code */
@@ -321,6 +369,15 @@ export function createSqliteStorage(options) {
     'SELECT * FROM admin_users WHERE username = ?',
   );
 
+  const insertAdminUserStmt = db.prepare(
+    `INSERT INTO admin_users (id, username, password_hash)
+     VALUES (?, ?, ?)`,
+  );
+
+  const listAdminUsernamesStmt = db.prepare(
+    'SELECT username FROM admin_users ORDER BY username ASC',
+  );
+
   const getLoginAttemptsByIpStmt = db.prepare(
     'SELECT * FROM login_attempts WHERE ip_address = ?',
   );
@@ -339,6 +396,8 @@ export function createSqliteStorage(options) {
      WHERE ip_address = ?`,
   );
 
+  const clearAllLoginAttemptsStmt = db.prepare('DELETE FROM login_attempts');
+
   // ---- payments store -------------------------------------------------------
 
   /**
@@ -347,9 +406,9 @@ export function createSqliteStorage(options) {
    * collision no partial row is stored.
    *
    * @param {import('../storage-interface.js').PendingPaymentInput} payment
-   * @returns {import('../storage-interface.js').Result<import('../storage-interface.js').Payment>}
+   * @returns {Promise<import('../storage-interface.js').Result<import('../storage-interface.js').Payment>>}
    */
-  function insertPending(payment) {
+  async function insertPending(payment) {
     const params = {
       id: payment.id,
       amount: payment.amount,
@@ -372,7 +431,20 @@ export function createSqliteStorage(options) {
       throw err;
     }
 
-    return { ok: true, value: getById(payment.id) };
+    return { ok: true, value: getByIdSync(payment.id) };
+  }
+
+  /**
+   * Synchronous read by id. Used internally by methods that already hold the
+   * event loop so they can return the freshly written row without an extra
+   * `await` round-trip. The async {@link getById} below is the contract surface.
+   *
+   * @param {string} id
+   * @returns {import('../storage-interface.js').Payment|null}
+   */
+  function getByIdSync(id) {
+    const row = getPaymentByIdStmt.get(id);
+    return row ?? null;
   }
 
   /**
@@ -381,11 +453,10 @@ export function createSqliteStorage(options) {
    * responsibility, not the DAL's.
    *
    * @param {string} id
-   * @returns {import('../storage-interface.js').Payment|null}
+   * @returns {Promise<import('../storage-interface.js').Payment|null>}
    */
-  function getById(id) {
-    const row = getPaymentByIdStmt.get(id);
-    return row ?? null;
+  async function getById(id) {
+    return getByIdSync(id);
   }
 
   /**
@@ -393,9 +464,9 @@ export function createSqliteStorage(options) {
    * paginated by the supplied limit/offset.
    *
    * @param {import('../storage-interface.js').ListOptions} [listOptions]
-   * @returns {import('../storage-interface.js').Payment[]}
+   * @returns {Promise<import('../storage-interface.js').Payment[]>}
    */
-  function listActive(listOptions) {
+  async function listActive(listOptions) {
     const { limit, offset } = normalizeListOptions(listOptions);
     return listActiveStmt.all(limit, offset);
   }
@@ -408,9 +479,9 @@ export function createSqliteStorage(options) {
    * The default page size is 50.
    *
    * @param {import('../storage-interface.js').ListOptions} [listOptions]
-   * @returns {import('../storage-interface.js').Payment[]}
+   * @returns {Promise<import('../storage-interface.js').Payment[]>}
    */
-  function listHistory(listOptions) {
+  async function listHistory(listOptions) {
     const { limit, offset } = normalizeHistoryOptions(listOptions);
     return listHistoryStmt.all(limit, offset);
   }
@@ -425,15 +496,10 @@ export function createSqliteStorage(options) {
    * before reaching the DAL. Optional `id` does a LIKE search, and `date`
    * filters by a `created_at` epoch range.
    *
-   * All filter combinations are served by a single prepared statement: a NULL
-   * `status`/`id`/`start` parameter short-circuits its own predicate to TRUE, so
-   * the same compiled plan is reused for every shape and the per-call
-   * parse/plan cost is avoided.
-   *
    * @param {{ status?: ('pending'|'paid'|'expired'|null), limit?: number, offset?: number, id?: string, date?: { start: number, end: number } }} [options]
-   * @returns {import('../storage-interface.js').Payment[]}
+   * @returns {Promise<import('../storage-interface.js').Payment[]>}
    */
-  function listAll(options = {}) {
+  async function listAll(options = {}) {
     const { limit, offset } = normalizeHistoryOptions(options);
     return listAllStmt.all({
       status: options.status ?? null,
@@ -452,9 +518,9 @@ export function createSqliteStorage(options) {
    * prepared statement as {@link listAll} so no SQL is recompiled per call.
    *
    * @param {{ status?: ('pending'|'paid'|'expired'|null), id?: string, date?: { start: number, end: number } }} [options]
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function countAll(options = {}) {
+  async function countAll(options = {}) {
     const row = countAllStmt.get({
       status: options.status ?? null,
       id: options.id ? `${options.id}%` : null,
@@ -474,9 +540,9 @@ export function createSqliteStorage(options) {
    *
    * @param {string} id
    * @param {import('../storage-interface.js').SettlementInput} settlement
-   * @returns {import('../storage-interface.js').Result<import('../storage-interface.js').Payment>}
+   * @returns {Promise<import('../storage-interface.js').Result<import('../storage-interface.js').Payment>>}
    */
-  function markPaid(id, settlement) {
+  async function markPaid(id, settlement) {
     const settle = db.transaction(() => {
       insertSettledTxStmt.run(settlement.txId, id, settlement.paidAt);
       const info = markPaidStmt.run({
@@ -488,6 +554,7 @@ export function createSqliteStorage(options) {
       });
       if (info.changes === 0) {
         // No pending payment matched: abort so settled_tx is not left dangling.
+        // Distinguish "no row matched" from a legitimate caller error.
         throw new SettlementAbort('PAYMENT_NOT_PENDING');
       }
     });
@@ -504,7 +571,7 @@ export function createSqliteStorage(options) {
       throw err;
     }
 
-    return { ok: true, value: getById(id) };
+    return { ok: true, value: getByIdSync(id) };
   }
 
   /**
@@ -512,9 +579,9 @@ export function createSqliteStorage(options) {
    * `now` to `expired`, returning how many were expired.
    *
    * @param {number} now - epoch ms.
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function expireOverdue(now) {
+  async function expireOverdue(now) {
     const info = expireOverdueStmt.run(now);
     return info.changes;
   }
@@ -528,19 +595,19 @@ export function createSqliteStorage(options) {
    * payment without double-firing.
    *
    * @param {number} now - epoch ms.
-   * @returns {import('../storage-interface.js').Payment[]} the payments that
+   * @returns {Promise<import('../storage-interface.js').Payment[]>} the payments that
    *   were just expired (empty when none were overdue).
    */
-  function expireOverdueReturning(now) {
+  async function expireOverdueReturning(now) {
     return expireOverdueReturningStmt.all(now);
   }
 
   /**
    * Count payments currently in `pending` status (drives Adaptive_Polling).
    *
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function countActive() {
+  async function countActive() {
     const row = countActiveStmt.get();
     return row.n;
   }
@@ -559,9 +626,9 @@ export function createSqliteStorage(options) {
    *
    * @param {number} minAmount - inclusive lower bound (Rupiah).
    * @param {number} maxAmount - inclusive upper bound (Rupiah).
-   * @returns {import('../storage-interface.js').Payment[]}
+   * @returns {Promise<import('../storage-interface.js').Payment[]>}
    */
-  function findCandidatesByAmount(minAmount, maxAmount) {
+  async function findCandidatesByAmount(minAmount, maxAmount) {
     return findCandidatesByAmountStmt.all(minAmount, maxAmount);
   }
 
@@ -570,9 +637,9 @@ export function createSqliteStorage(options) {
    * there are none. The Payment_Service uses this to widen the indexed candidate
    * range scan so it covers every payment's own tolerance window.
    *
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function maxActiveTolerance() {
+  async function maxActiveTolerance() {
     const row = maxActiveToleranceStmt.get();
     return Number.isFinite(row?.m) ? row.m : 0;
   }
@@ -583,9 +650,9 @@ export function createSqliteStorage(options) {
    * Read a configuration value by key, or `null` if it is unset.
    *
    * @param {string} key
-   * @returns {string|null}
+   * @returns {Promise<string|null>}
    */
-  function configGet(key) {
+  async function configGet(key) {
     const row = configGetStmt.get(key);
     return row ? row.value : null;
   }
@@ -596,9 +663,9 @@ export function createSqliteStorage(options) {
    *
    * @param {string} key
    * @param {string} value
-   * @returns {import('../storage-interface.js').Result}
+   * @returns {Promise<import('../storage-interface.js').Result>}
    */
-  function configSet(key, value) {
+  async function configSet(key, value) {
     configSetStmt.run(key, value);
     return { ok: true };
   }
@@ -626,9 +693,9 @@ export function createSqliteStorage(options) {
    * than throw.
    *
    * @param {import('../storage-interface.js').ApiKeyCreateInput} input
-   * @returns {import('../storage-interface.js').Result<import('../storage-interface.js').ApiKeyRecord>}
+   * @returns {Promise<import('../storage-interface.js').Result<import('../storage-interface.js').ApiKeyRecord>>}
    */
-  function apiKeyCreate(input) {
+  async function apiKeyCreate(input) {
     try {
       insertApiKeyStmt.run({
         id: input.id,
@@ -651,9 +718,9 @@ export function createSqliteStorage(options) {
    * so the auth plugin treats both as a rejection.
    *
    * @param {string} keyHash
-   * @returns {import('../storage-interface.js').ApiKeyRecord|null}
+   * @returns {Promise<import('../storage-interface.js').ApiKeyRecord|null>}
    */
-  function apiKeyGetActiveByHash(keyHash) {
+  async function apiKeyGetActiveByHash(keyHash) {
     return toApiKeyRecord(getActiveApiKeyByHashStmt.get(keyHash));
   }
 
@@ -666,9 +733,9 @@ export function createSqliteStorage(options) {
    *
    * @param {string} id
    * @param {number} revokedAt - epoch ms when the revocation occurred.
-   * @returns {import('../storage-interface.js').Result<import('../storage-interface.js').ApiKeyRecord>}
+   * @returns {Promise<import('../storage-interface.js').Result<import('../storage-interface.js').ApiKeyRecord>>}
    */
-  function apiKeyRevoke(id, revokedAt) {
+  async function apiKeyRevoke(id, revokedAt) {
     const info = revokeApiKeyStmt.run({ id, revoked_at: revokedAt });
     if (info.changes === 0) {
       return { ok: false, code: 'KEY_NOT_REVOCABLE' };
@@ -681,9 +748,9 @@ export function createSqliteStorage(options) {
    * are never selected, only the display prefix, status, and timestamps.
    * Newest keys come first.
    *
-   * @returns {import('../storage-interface.js').MaskedApiKey[]}
+   * @returns {Promise<import('../storage-interface.js').MaskedApiKey[]>}
    */
-  function apiKeyListMasked() {
+  async function apiKeyListMasked() {
     return listMaskedApiKeysStmt.all();
   }
 
@@ -696,9 +763,9 @@ export function createSqliteStorage(options) {
    * error (if any). Each appended row carries a caller-supplied unique `id`.
    *
    * @param {import('../storage-interface.js').WebhookLogEntry} entry
-   * @returns {import('../storage-interface.js').Result}
+   * @returns {Promise<import('../storage-interface.js').Result>}
    */
-  function webhookLogAppend(entry) {
+  async function webhookLogAppend(entry) {
     insertWebhookLogStmt.run({
       id: entry.id,
       payment_id: entry.payment_id,
@@ -720,9 +787,9 @@ export function createSqliteStorage(options) {
    * and yields `{ ok:false, code:'LOG_NOT_FOUND' }` without mutating any data.
    *
    * @param {string} id - the delivery-log row id to mark permanently failed.
-   * @returns {import('../storage-interface.js').Result}
+   * @returns {Promise<import('../storage-interface.js').Result>}
    */
-  function webhookLogMarkPermanentFailure(id) {
+  async function webhookLogMarkPermanentFailure(id) {
     const info = markWebhookLogPermanentStmt.run(id);
     if (info.changes === 0) {
       return { ok: false, code: 'LOG_NOT_FOUND' };
@@ -737,9 +804,9 @@ export function createSqliteStorage(options) {
    * captured `response_status`, `response_body`, and `request_body` columns.
    *
    * @param {string} paymentId
-   * @returns {Array<Record<string, any>>}
+   * @returns {Promise<Array<Record<string, any>>>}
    */
-  function webhookLogListByPayment(paymentId) {
+  async function webhookLogListByPayment(paymentId) {
     return listWebhookLogsByPaymentStmt.all(paymentId);
   }
 
@@ -749,9 +816,9 @@ export function createSqliteStorage(options) {
    * once-daily retention pass so the log table cannot grow without bound.
    *
    * @param {number} cutoff - epoch ms; rows older than this are deleted.
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function webhookLogPruneOld(cutoff) {
+  async function webhookLogPruneOld(cutoff) {
     const info = pruneWebhookLogsStmt.run(cutoff);
     return info.changes;
   }
@@ -764,11 +831,146 @@ export function createSqliteStorage(options) {
    * (never a SQLite row class).
    *
    * @param {string} username
-   * @returns {import('../storage-interface.js').AdminUser|null}
+   * @returns {Promise<import('../storage-interface.js').AdminUser|null>}
    */
-  function adminGetByUsername(username) {
+  async function adminGetByUsername(username) {
     const row = getAdminUserByUsernameStmt.get(username);
     return row ?? null;
+  }
+
+  /**
+   * Idempotently insert the initial admin user. When the username already
+   * exists the stored password hash is LEFT UNCHANGED (later env changes do not
+   * overwrite a configured user), and `{ ok:true, value:{ created:false } }` is
+   * resolved. When a new row is inserted the supplied hash is stored and the
+   * result is `{ ok:true, value:{ created:true } }`.
+   *
+   * The whole operation runs inside one transaction so a concurrent caller
+   * racing to insert the same username cannot leave partial state: the
+   * `username` UNIQUE constraint makes exactly one insert win.
+   *
+   * @param {import('../storage-interface.js').EnsureAdminInput} input
+   * @returns {Promise<import('../storage-interface.js').Result<{ created: boolean }>>}
+   */
+  async function adminEnsure(input) {
+    const existing = getAdminUserByUsernameStmt.get(input.username);
+    if (existing) {
+      return { ok: true, value: { created: false } };
+    }
+    try {
+      insertAdminUserStmt.run(input.id, input.username, input.passwordHash);
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        // A concurrent caller inserted the same username between our check and
+        // insert. Treat it as already present without changing the password.
+        return { ok: true, value: { created: false } };
+      }
+      throw err;
+    }
+    return { ok: true, value: { created: true } };
+  }
+
+  /**
+   * List every admin username. Returns only usernames (no password hashes),
+   * ordered alphabetically. Used by the out-of-band management CLI.
+   *
+   * @returns {Promise<Array<{ username: string }>>}
+   */
+  async function adminListUsernames() {
+    return listAdminUsernamesStmt.all().map((row) => ({ username: row.username }));
+  }
+
+  /**
+   * Update an existing admin user's password hash and/or rename it. The whole
+   * operation runs inside one transaction: a rename first checks the target
+   * username is free, then applies the change. A missing admin yields
+   * `{ ok:false, code:'ADMIN_NOT_FOUND' }`; a rename to a taken username yields
+   * `{ ok:false, code:'USERNAME_IN_USE' }` without modifying either row.
+   *
+   * @param {import('../storage-interface.js').UpdateAdminInput} input
+   * @returns {Promise<import('../storage-interface.js').Result<import('../storage-interface.js').AdminUser>>}
+   */
+  async function adminUpdateCredentials(input) {
+    const renameTo =
+      typeof input.newUsername === 'string' && input.newUsername !== input.currentUsername
+        ? input.newUsername
+        : null;
+    const newPasswordHash =
+      typeof input.passwordHash === 'string' && input.passwordHash.length > 0
+        ? input.passwordHash
+        : null;
+
+    if (renameTo === null && newPasswordHash === null) {
+      // Nothing to change: still confirm the admin exists.
+      const existing = getAdminUserByUsernameStmt.get(input.currentUsername);
+      if (!existing) {
+        return { ok: false, code: 'ADMIN_NOT_FOUND' };
+      }
+      return { ok: true, value: toAdminUser(existing) };
+    }
+
+    const runUpdate = db.transaction(() => {
+      const existing = getAdminUserByUsernameStmt.get(input.currentUsername);
+      if (!existing) {
+        throw new UpdateAbort('ADMIN_NOT_FOUND');
+      }
+      if (renameTo !== null) {
+        const clash = getAdminUserByUsernameStmt.get(renameTo);
+        if (clash) {
+          throw new UpdateAbort('USERNAME_IN_USE');
+        }
+      }
+      /** @type {string[]} */
+      const sets = [];
+      /** @type {Record<string, unknown>} */
+      const params = { username: input.currentUsername };
+      if (renameTo !== null) {
+        sets.push('username = @newUsername');
+        params.newUsername = renameTo;
+      }
+      if (newPasswordHash !== null) {
+        sets.push('password_hash = @passwordHash');
+        params.passwordHash = newPasswordHash;
+      }
+      db.prepare(`UPDATE admin_users SET ${sets.join(', ')} WHERE username = @username`).run(params);
+      return getAdminUserByUsernameStmt.get(renameTo ?? input.currentUsername);
+    });
+
+    try {
+      const updated = runUpdate();
+      return { ok: true, value: toAdminUser(updated) };
+    } catch (err) {
+      if (err instanceof UpdateAbort) {
+        return { ok: false, code: err.code };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Sentinel thrown inside {@link adminUpdateCredentials} to roll back the
+   * transaction when the target admin is missing or the rename target is taken.
+   */
+  class UpdateAbort extends Error {
+    /** @param {string} code */
+    constructor(code) {
+      super(code);
+      this.name = 'UpdateAbort';
+      this.code = code;
+    }
+  }
+
+  /**
+   * Synchronous admin-user mapper (no `null` coercion needed; the row is
+   * already verified to exist at the call sites that use this).
+   *
+   * @param {Record<string, any>|null} row
+   * @returns {import('../storage-interface.js').AdminUser|null}
+   */
+  function toAdminUser(row) {
+    return row
+      ? { id: row.id, username: row.username, password_hash: row.password_hash }
+      : null;
   }
 
   // ---- loginAttempts store --------------------------------------------------
@@ -777,9 +979,9 @@ export function createSqliteStorage(options) {
    * Read the rate-limit state for an IP address.
    *
    * @param {string} ipAddress
-   * @returns {{ failedAttempts: number, lockoutUntil: number|null }|null}
+   * @returns {Promise<{ failedAttempts: number, lockoutUntil: number|null }|null>}
    */
-  function loginAttemptsGetByIp(ipAddress) {
+  async function loginAttemptsGetByIp(ipAddress) {
     const row = getLoginAttemptsByIpStmt.get(ipAddress);
     if (!row) {
       return null;
@@ -788,28 +990,36 @@ export function createSqliteStorage(options) {
   }
 
   /**
-   * Persist the failed-login counters for an IP address.
+   * Atomically record a failed login for an IP address. Reads the current
+   * counters, applies the fixed-window failure policy, and persists the new
+   * state in one step (better-sqlite3 is synchronous, so the read/compute/write
+   * sequence cannot be interleaved). Resolves to the new state.
    *
    * @param {string} ipAddress
-   * @param {{ failedAttempts: number, lockoutUntil: number|null }} state
-   * @returns {import('../storage-interface.js').Result}
+   * @param {import('../storage-interface.js').LoginFailurePolicy} policy
+   * @returns {Promise<import('../storage-interface.js').Result<{ failedAttempts: number, lockoutUntil: number|null }>>}
    */
-  function loginAttemptsRecordFailure(ipAddress, state) {
+  async function loginAttemptsRecordFailure(ipAddress, policy) {
+    const row = getLoginAttemptsByIpStmt.get(ipAddress);
+    const state = row
+      ? { failedAttempts: row.failed_attempts, lockoutUntil: row.lockout_until }
+      : null;
+    const next = applyFailurePolicy(state, policy);
     setLoginAttemptsStmt.run({
       ip_address: ipAddress,
-      failed_attempts: state.failedAttempts,
-      lockout_until: state.lockoutUntil ?? null,
+      failed_attempts: next.failedAttempts,
+      lockout_until: next.lockoutUntil ?? null,
     });
-    return { ok: true };
+    return { ok: true, value: next };
   }
 
   /**
    * Clear the failed-login counters for an IP address after a successful login.
    *
    * @param {string} ipAddress
-   * @returns {import('../storage-interface.js').Result}
+   * @returns {Promise<import('../storage-interface.js').Result>}
    */
-  function loginAttemptsResetFailures(ipAddress) {
+  async function loginAttemptsResetFailures(ipAddress) {
     resetLoginAttemptsStmt.run(ipAddress);
     return { ok: true };
   }
@@ -819,48 +1029,63 @@ export function createSqliteStorage(options) {
    *
    * @param {string} ipAddress
    * @param {number} now - epoch ms.
-   * @returns {boolean}
+   * @returns {Promise<boolean>}
    */
-  function loginAttemptsIsLockedOut(ipAddress, now) {
-    const state = loginAttemptsGetByIp(ipAddress);
-    if (state === null) {
+  async function loginAttemptsIsLockedOut(ipAddress, now) {
+    const row = getLoginAttemptsByIpStmt.get(ipAddress);
+    if (!row) {
       return false;
     }
     return (
-      state.lockoutUntil !== null &&
-      state.failedAttempts >= ADMIN_LOCKOUT_THRESHOLD &&
-      now < state.lockoutUntil
+      row.lockout_until !== null &&
+      row.failed_attempts >= DEFAULT_LOGIN_THRESHOLD &&
+      now < row.lockout_until
     );
   }
 
-  // ---- atomic multi-write helper -------------------------------------------
+  /**
+   * Wipe EVERY IP's failed-login counters. Used only by the out-of-band
+   * management CLI to unlock all admins at once. Returns how many rows were
+   * removed.
+   *
+   * @returns {Promise<number>}
+   */
+  async function loginAttemptsClearAll() {
+    const info = clearAllLoginAttemptsStmt.run();
+    return info.changes;
+  }
+
+  // ---- top-level lifecycle --------------------------------------------------
+
+  /** @type {boolean} tracks whether {@link close} has already been invoked. */
+  let closed = false;
 
   /**
-   * Run `fn` inside a single atomic transaction. If `fn` throws, every write is
-   * rolled back and the failure is reported as `{ ok:false, error }`; on success
-   * the result is `{ ok:true, value }`.
+   * Readiness probe: confirm the underlying connection is still open. The
+   * SQLite connection is synchronous and in-process, so a successful return is
+   * sufficient evidence of readiness; the call rejects if the connection was
+   * already closed.
    *
-   * @template T
-   * @param {() => T} fn
-   * @returns {import('../storage-interface.js').Result<T>}
+   * @returns {Promise<void>}
    */
-  function tx(fn) {
-    const runner = db.transaction(() => fn());
-    try {
-      const value = runner();
-      return { ok: true, value };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: message };
+  async function ping() {
+    if (closed || !db.open) {
+      throw new Error('SQLite database is closed.');
     }
+    // A trivial scalar select proves the connection actually answers.
+    db.prepare('SELECT 1').get();
   }
 
   /**
-   * Release the underlying connection.
+   * Release the underlying connection. Idempotent: a second call is a no-op.
    *
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  function close() {
+  async function close() {
+    if (closed) {
+      return;
+    }
+    closed = true;
     db.close();
   }
 
@@ -882,6 +1107,9 @@ export function createSqliteStorage(options) {
 
   const adminUsers = {
     getByUsername: adminGetByUsername,
+    ensure: adminEnsure,
+    listUsernames: adminListUsernames,
+    updateCredentials: adminUpdateCredentials,
   };
 
   const loginAttempts = {
@@ -889,6 +1117,7 @@ export function createSqliteStorage(options) {
     recordFailure: loginAttemptsRecordFailure,
     resetFailures: loginAttemptsResetFailures,
     isLockedOut: loginAttemptsIsLockedOut,
+    clearAll: loginAttemptsClearAll,
   };
 
   return {
@@ -914,7 +1143,32 @@ export function createSqliteStorage(options) {
       get: configGet,
       set: configSet,
     },
-    tx,
+    ping,
     close,
   };
+}
+
+/**
+ * Internal-only export: the default login-failure policy constants, used by
+ * the seedAdmin path to build a policy when one is not supplied. Kept here so
+ * the constants have a single home alongside the SQLite adapter.
+ *
+ * Exported only for `server.js`'s admin seeding helper.
+ */
+export const SQLITE_LOGIN_POLICY_DEFAULTS = Object.freeze({
+  windowMs: DEFAULT_LOGIN_WINDOW_MS,
+  threshold: DEFAULT_LOGIN_THRESHOLD,
+  lockoutMs: DEFAULT_LOGIN_LOCKOUT_MS,
+});
+
+/**
+ * Internal-only re-export so callers that build a Storage without going through
+ * the factory (tests, seeding) can generate ids with the same scheme the
+ * `ensure` operation expects to be supplied externally. Currently a thin
+ * wrapper around `crypto.randomUUID`.
+ *
+ * @returns {string}
+ */
+export function generateAdminId() {
+  return randomUUID();
 }

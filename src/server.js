@@ -30,7 +30,6 @@
 
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import Fastify from 'fastify';
 
@@ -96,6 +95,40 @@ function defaultLoggerConfig() {
 const DEFAULT_WEBHOOK_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * Upper bound on how long the readiness probe waits for a storage `ping()` to
+ * resolve. Keeps `/health/ready` snappy even when the backend is slow to
+ * respond, so the supervisor does not time out first.
+ *
+ * @type {number}
+ */
+const HEALTH_PING_TIMEOUT_MS = 3000;
+
+/**
+ * Resolve with the result of `promise`, but reject with a `TimeoutError` if it
+ * does not settle within `ms` milliseconds. Used by the readiness probe so a
+ * hung storage backend cannot hang the health check.
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @returns {Promise<T>}
+ */
+function withTimeout(promise, ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return promise;
+  }
+  let handle;
+  const timeout = new Promise((_, reject) => {
+    handle = setTimeout(() => reject(new Error('storage ping timed out')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (handle !== undefined) {
+      clearTimeout(handle);
+    }
+  });
+}
+
+/**
  * Parse the `WEBHOOK_LOG_RETENTION_DAYS` env var into a retention window in
  * milliseconds. A missing or non-positive value falls back to `defaultMs`.
  *
@@ -148,45 +181,36 @@ function installErrorHandler(app) {
 }
 
 /**
- * Ensure a single Admin user exists so the Panel can be logged into. The DAL's
- * `adminUsers` store has no create method (admins are provisioned out-of-band),
- * so seeding is done here against the same on-disk database file when both
- * `ADMIN_USERNAME` and `ADMIN_PASSWORD` are configured and the user is absent.
+ * Ensure a single Admin user exists so the Panel can be logged into. Seeding is
+ * performed through the storage-agnostic `adminUsers.ensure()` operation: an
+ * idempotent insert-if-absent that does NOT change the password of an existing
+ * user when the environment values change. The password is stored only as a
+ * scrypt hash.
  *
- * The password is stored only as a scrypt hash. Seeding is
- * skipped for in-memory databases (a second connection would not share the same
- * data) and when the user already exists.
+ * Seeding runs for every backend (SQLite or MongoDB); there is no longer a
+ * direct database connection opened from here, so the in-memory SQLite
+ * short-circuit the previous implementation needed is gone.
  *
  * @param {import('./dal/storage-interface.js').Storage} storage
- * @param {{ dbPath: string, username?: string, password?: string }} params
+ * @param {{ username?: string, password?: string }} params
  * @param {Pick<Console, 'log' | 'warn'>} [logger]
- * @returns {boolean} whether a user was seeded.
+ * @returns {Promise<boolean>} whether a user was seeded.
  */
-export function seedAdminUser(storage, params, logger = console) {
-  const { dbPath, username, password } = params;
+export async function seedAdminUser(storage, params, logger = console) {
+  const { username, password } = params;
   if (!username || !password) {
     return false;
   }
-  if (dbPath === ':memory:' || dbPath === '') {
-    return false;
-  }
-  if (storage.adminUsers.getByUsername(username) !== null) {
-    return false;
-  }
-
-  const raw = new Database(dbPath);
-  try {
-    raw
-      .prepare(
-        `INSERT INTO admin_users (id, username, password_hash)
-         VALUES (?, ?, ?)`,
-      )
-      .run(randomUUID(), username, hashPasswordSync(password));
+  const result = await storage.adminUsers.ensure({
+    id: randomUUID(),
+    username,
+    passwordHash: hashPasswordSync(password),
+  });
+  if (result.ok && result.value?.created) {
     logger?.log?.(`[server] Seeded the initial admin user '${username}'.`);
     return true;
-  } finally {
-    raw.close();
   }
+  return false;
 }
 
 /**
@@ -228,9 +252,10 @@ export function seedAdminUser(storage, params, logger = console) {
 export async function buildServer(options = {}) {
   const dbPath = options.dbPath ?? process.env.DB_PATH ?? DEFAULT_DB_PATH;
 
-  // 1) DAL.
+  // 1) DAL. `createDal` is awaitable so backend startup (MongoDB index creation,
+  // connection establishment) completes before the server accepts traffic.
   const ownsStorage = !options.storage;
-  const storage = options.storage ?? createDal({ dbPath });
+  const storage = options.storage ?? (await createDal({ dbPath }));
 
   // 2) Config Service.
   const config = options.config ?? createConfigService(storage);
@@ -275,8 +300,14 @@ export async function buildServer(options = {}) {
       storage,
       config,
       ensureRunning: () => {
+        // `ensureRunning` now returns a Promise (the active-count read is
+        // async). The Payment_Service calls this hook fire-and-forget, so the
+        // Promise must never float an unhandled rejection: attach a catch.
         if (poller && typeof poller.ensureRunning === 'function') {
-          poller.ensureRunning();
+          Promise.resolve(poller.ensureRunning()).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn(`[server] Poller failed to start: ${err?.message ?? err}`);
+          });
         }
       },
       onSettled: (payment) => {
@@ -301,15 +332,19 @@ export async function buildServer(options = {}) {
       pollImmediately: true,
       // Once-daily housekeeping: prune webhook delivery-log rows older than the
       // retention window so the table cannot grow without bound. Rides the poll
-      // tick (no extra timer) and is best-effort; a throw is logged, not fatal.
-      onMaintenance: () => {
+      // tick (no extra timer) and is best-effort; a throw is logged by the
+      // poller, not fatal. The callback is async and awaits the (async) prune
+      // so the removal count is logged and a MongoDB write failure is caught by
+      // the poller's maintenance guard instead of becoming an unhandled
+      // rejection.
+      onMaintenance: async () => {
         const retentionMs = parseRetentionMs(
           process.env.WEBHOOK_LOG_RETENTION_DAYS,
           DEFAULT_WEBHOOK_LOG_RETENTION_MS,
         );
         if (typeof storage.webhookLogs?.pruneOld === 'function') {
           const cutoff = Date.now() - retentionMs;
-          const removed = storage.webhookLogs.pruneOld(cutoff);
+          const removed = await storage.webhookLogs.pruneOld(cutoff);
           if (removed > 0) {
             // eslint-disable-next-line no-console
             console.log(`[server] Pruned ${removed} webhook delivery-log rows older than ${Math.round(retentionMs / (24 * 60 * 60 * 1000))} day(s).`);
@@ -329,10 +364,10 @@ export async function buildServer(options = {}) {
     });
   const apiKeyManager = options.apiKeyManager ?? createApiKeyManager(storage);
 
-  // Seed the initial admin user from the environment (file-backed DBs only).
+  // Seed the initial admin user from the environment. Idempotent: an existing
+  // user is left untouched (the password is NOT overwritten by env changes).
   if (options.seedAdmin !== false) {
-    seedAdminUser(storage, {
-      dbPath,
+    await seedAdminUser(storage, {
       username: process.env.ADMIN_USERNAME,
       password: process.env.ADMIN_PASSWORD,
     });
@@ -347,10 +382,52 @@ export async function buildServer(options = {}) {
 
   installErrorHandler(app);
 
-  // Render and other supervisors use a lightweight unauthenticated health
-  // check to decide whether the process is ready to receive traffic. Keep
-  // this endpoint independent from GoBiz authentication and payment state.
-  app.get('/health', async () => ({ status: 'ok' }));
+  // Health endpoints for liveness and readiness probes.
+  //
+  //   /health/live  — process liveness. Always 200 while the event loop turns.
+  //                   Never touches storage so a backend hiccup cannot make the
+  //                   process look dead to the supervisor.
+  //   /health/ready — storage readiness. Calls `storage.ping()` with a bounded
+  //                   timeout and reports 503 when the backend is unreachable,
+  //                   so a deploying or unhealthy instance stops receiving
+  //                   traffic until it recovers.
+  //   /health       — kept as a back-compat alias of /health/ready for existing
+  //                   supervisors configured before /health/ready was added.
+  //
+  // None of these endpoints depend on GoBiz authentication or payment state.
+  app.get('/health/live', async (_req, reply) => {
+    return reply.code(200).send({ status: 'ok' });
+  });
+
+  /**
+   * Bound a storage `ping()` call so a stuck backend cannot hang the readiness
+   * probe indefinitely. Resolves `{ ok: true }` on success and
+   * `{ ok: false, error }` on failure or timeout.
+   *
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  async function boundedPing() {
+    if (!storage || typeof storage.ping !== 'function') {
+      return { ok: true };
+    }
+    try {
+      await withTimeout(storage.ping(), HEALTH_PING_TIMEOUT_MS);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  const readinessHandler = async (_req, reply) => {
+    const probe = await boundedPing();
+    if (probe.ok) {
+      return reply.code(200).send({ status: 'ok' });
+    }
+    // 503 with no credentials/connection details — just a generic message.
+    return reply.code(503).send({ status: 'unavailable' });
+  };
+  app.get('/health/ready', readinessHandler);
+  app.get('/health', readinessHandler);
 
   // Machine-facing payment routes; the plugin attaches the API-key preHandler
   // on its own scope, so every /payment* route is API-key protected.
@@ -377,17 +454,21 @@ export async function buildServer(options = {}) {
   app.decorate('poller', poller);
 
   // Stop the poller and (when we created it) close the DAL on shutdown.
+  // `storage.close()` is awaitable and idempotent, so a second shutdown signal
+  // (e.g. SIGINT right after SIGTERM) is a safe no-op.
   app.addHook('onClose', async () => {
     if (poller && typeof poller.stop === 'function') {
-      poller.stop();
+      // `stop()` is async: it drains any in-flight reschedule so a concurrent
+      // schedule cannot resurrect a timer after shutdown.
+      await poller.stop();
     }
     if (ownsStorage && typeof storage.close === 'function') {
-      storage.close();
+      await storage.close();
     }
   });
 
   if (options.startPoller && poller && typeof poller.ensureRunning === 'function') {
-    poller.ensureRunning();
+    await poller.ensureRunning();
   }
 
   // Pre-warm the GoBiz Integration Layer in the background (only when explicitly
@@ -417,7 +498,9 @@ export async function buildServer(options = {}) {
 
 /**
  * Start the server: build it, begin polling, and listen on the configured host
- * and port. Used only when this file is run directly.
+ * and port. Installs `SIGTERM` and `SIGINT` handlers that call and await
+ * `app.close()` so shutdown stops the poller and closes owned storage safely.
+ * Used only when this file is run directly.
  *
  * @returns {Promise<import('fastify').FastifyInstance>}
  */
@@ -428,6 +511,34 @@ export async function startServer() {
   await app.listen({ port, host });
   // eslint-disable-next-line no-console
   console.log(`[server] Listening on http://${host}:${port}`);
+
+  /** Track shutdown so a second signal is a hard exit, not a second graceful drain. */
+  let shuttingDown = false;
+  const gracefulShutdown = (signal) => {
+    if (shuttingDown) {
+      // eslint-disable-next-line no-console
+      console.log(`[server] Received ${signal} again; forcing exit.`);
+      process.exit(1);
+    }
+    shuttingDown = true;
+    // eslint-disable-next-line no-console
+    console.log(`[server] Received ${signal}; shutting down gracefully.`);
+    app.close().then(
+      () => {
+        // eslint-disable-next-line no-console
+        console.log('[server] Closed.');
+        process.exit(0);
+      },
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error('[server] Error during shutdown:', err);
+        process.exit(1);
+      },
+    );
+  };
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
   return app;
 }
 

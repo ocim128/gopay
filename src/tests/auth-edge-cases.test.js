@@ -47,26 +47,26 @@ describe('API key reveal-once and invalid revoke', () => {
     });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
   describe('reveal-once', () => {
-    it('returns the full plaintext value exactly once on creation', () => {
-      const created = manager.createApiKey();
+    it('returns the full plaintext value exactly once on creation', async () => {
+      const created = await manager.createApiKey();
       // The plaintext is present in the creation response...
       expect(typeof created.value).toBe('string');
       expect(created.value.length).toBeGreaterThan(0);
       // ...and the hash of that plaintext is what was actually persisted, so
       // the response is the only place the plaintext ever appears.
-      const stored = storage.apiKeys.getActiveByHash(hashApiKey(created.value));
+      const stored = await storage.apiKeys.getActiveByHash(hashApiKey(created.value));
       expect(stored).not.toBeNull();
       expect(stored.key_hash).toBe(hashApiKey(created.value));
     });
 
-    it('never exposes the full value through the masked listing afterward', () => {
-      const created = manager.createApiKey();
-      const list = manager.listApiKeys();
+    it('never exposes the full value through the masked listing afterward', async () => {
+      const created = await manager.createApiKey();
+      const list = await manager.listApiKeys();
       expect(list).toHaveLength(1);
       const [masked] = list;
       // The masked row carries only the short display prefix, not the secret.
@@ -75,9 +75,13 @@ describe('API key reveal-once and invalid revoke', () => {
       expect(JSON.stringify(masked)).not.toContain(created.value);
     });
 
-    it('keeps the full value out of every masked row across multiple keys', () => {
-      const created = [manager.createApiKey(), manager.createApiKey(), manager.createApiKey()];
-      const serialized = JSON.stringify(manager.listApiKeys());
+    it('keeps the full value out of every masked row across multiple keys', async () => {
+      const created = [
+        await manager.createApiKey(),
+        await manager.createApiKey(),
+        await manager.createApiKey(),
+      ];
+      const serialized = JSON.stringify(await manager.listApiKeys());
       for (const key of created) {
         expect(serialized).not.toContain(key.value);
         expect(serialized).not.toContain(hashApiKey(key.value));
@@ -86,33 +90,33 @@ describe('API key reveal-once and invalid revoke', () => {
   });
 
   describe('invalid revoke', () => {
-    it('rejects revoking a non-existent id with KEY_NOT_REVOCABLE and changes nothing', () => {
-      const created = manager.createApiKey();
-      const before = manager.listApiKeys();
+    it('rejects revoking a non-existent id with KEY_NOT_REVOCABLE and changes nothing', async () => {
+      const created = await manager.createApiKey();
+      const before = await manager.listApiKeys();
 
-      const result = manager.revokeApiKey('no-such-id');
+      const result = await manager.revokeApiKey('no-such-id');
       expect(result).toEqual({ ok: false, code: 'KEY_NOT_REVOCABLE' });
 
       // The existing key is untouched and still authenticates.
-      expect(manager.listApiKeys()).toEqual(before);
-      expect(storage.apiKeys.getActiveByHash(hashApiKey(created.value))).not.toBeNull();
+      expect(await manager.listApiKeys()).toEqual(before);
+      expect(await storage.apiKeys.getActiveByHash(hashApiKey(created.value))).not.toBeNull();
     });
 
-    it('rejects revoking an already-revoked key with KEY_NOT_REVOCABLE and changes nothing', () => {
-      const created = manager.createApiKey();
+    it('rejects revoking an already-revoked key with KEY_NOT_REVOCABLE and changes nothing', async () => {
+      const created = await manager.createApiKey();
       clock = 5000;
-      const first = manager.revokeApiKey(created.id);
+      const first = await manager.revokeApiKey(created.id);
       expect(first.ok).toBe(true);
 
-      const afterFirstRevoke = manager.listApiKeys();
+      const afterFirstRevoke = await manager.listApiKeys();
       clock = 9000; // advancing the clock must not bleed into a second revoke
 
-      const second = manager.revokeApiKey(created.id);
+      const second = await manager.revokeApiKey(created.id);
       expect(second).toEqual({ ok: false, code: 'KEY_NOT_REVOCABLE' });
 
       // The second (rejected) revoke leaves the key exactly as the first left
       // it: still revoked, with the original revoked_at, not 9000.
-      const list = manager.listApiKeys();
+      const list = await manager.listApiKeys();
       expect(list).toEqual(afterFirstRevoke);
       expect(list[0]).toMatchObject({ status: 'revoked', revoked_at: 5000 });
     });
@@ -156,8 +160,8 @@ describe('Admin login empty fields', () => {
     auth = createAdminAuth(storage, { now: () => clock, secret: SECRET });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
     for (const suffix of ['', '-wal', '-shm']) {
       rmSync(`${dbPath}${suffix}`, { force: true });
     }
@@ -187,7 +191,7 @@ describe('Admin login empty fields', () => {
     await auth.login('   ', PASSWORD, '127.0.0.1');
     await auth.login(USERNAME, '', '127.0.0.1');
 
-    expect(storage.loginAttempts.getByIp('127.0.0.1')).toBeNull();
+    expect(await storage.loginAttempts.getByIp('127.0.0.1')).toBeNull();
   });
 
   it('still authenticates with valid credentials after rejected empty attempts', async () => {

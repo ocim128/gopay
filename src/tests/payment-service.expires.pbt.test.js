@@ -24,29 +24,29 @@ const VALID_STATIC_QRIS =
   '00020101021126610014COM.GO-JEK.WWW01189360091434970566750210G4970566750303UMI51440014ID.CO.QRIS.WWW0215ID10254118460050303UMI5204899953033605802ID5925Scalify Panel, Digital & 6015JAKARTA SELATAN61051200062070703A016304CD45';
 
 /** A minimal Config Service stub exposing only the method the service reads. */
-const configStub = { getStaticQris: () => VALID_STATIC_QRIS };
+const configStub = { getStaticQris: async () => VALID_STATIC_QRIS };
 
 describe('Property 3: expires_at invariant', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('sets expires_at - created_at === timeout for any valid timeout', () => {
-    fc.assert(
-      fc.property(
+  it('sets expires_at - created_at === timeout for any valid timeout', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // Valid per-Payment timeout window in ms (10s .. 24h).
         fc.integer({ min: 10000, max: 86400000 }),
         // Valid Amount in 1000..9999000.
         fc.integer({ min: 1000, max: 9999000 }),
         // An arbitrary clock value the injected `now` returns.
         fc.integer({ min: 0, max: 2_000_000_000_000 }),
-        (timeout, amount, nowValue) => {
+        async (timeout, amount, nowValue) => {
           storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
           const service = createPaymentService({
             storage,
@@ -54,7 +54,7 @@ describe('Property 3: expires_at invariant', () => {
             now: () => nowValue,
           });
 
-          const payment = service.createPayment({ mode: 'client', amount, timeout });
+          const payment = await service.createPayment({ mode: 'client', amount, timeout });
 
           // The core invariant.
           expect(payment.expires_at - payment.created_at).toBe(timeout);
@@ -63,7 +63,7 @@ describe('Property 3: expires_at invariant', () => {
           expect(payment.expires_at).toBe(nowValue + timeout);
           expect(payment.timeout).toBe(timeout);
 
-          storage.close();
+          await storage.close();
           storage = null;
         },
       ),
@@ -71,12 +71,12 @@ describe('Property 3: expires_at invariant', () => {
     );
   });
 
-  it('uses the default timeout (300000) when timeout is omitted', () => {
-    fc.assert(
-      fc.property(
+  it('uses the default timeout (300000) when timeout is omitted', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         fc.integer({ min: 1000, max: 9999000 }),
         fc.integer({ min: 0, max: 2_000_000_000_000 }),
-        (amount, nowValue) => {
+        async (amount, nowValue) => {
           storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
           const service = createPaymentService({
             storage,
@@ -84,13 +84,13 @@ describe('Property 3: expires_at invariant', () => {
             now: () => nowValue,
           });
 
-          const payment = service.createPayment({ mode: 'client', amount });
+          const payment = await service.createPayment({ mode: 'client', amount });
 
           expect(payment.timeout).toBe(DEFAULT_TIMEOUT_MS);
           expect(payment.expires_at - payment.created_at).toBe(DEFAULT_TIMEOUT_MS);
           expect(payment.expires_at).toBe(nowValue + DEFAULT_TIMEOUT_MS);
 
-          storage.close();
+          await storage.close();
           storage = null;
         },
       ),

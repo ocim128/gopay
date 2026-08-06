@@ -77,16 +77,16 @@ export function backoffDelayMs(attempt) {
  * is skipped entirely.
  *
  * @param {{ webhook_url?: string|null }} payment
- * @param {{ get: (key: string) => (string|null) }|null|undefined} config
- * @returns {string|null} the selected URL, or `null` when none is available.
+ * @param {{ get: (key: string) => (Awaitable<(string|null)>|string|null) }|null|undefined} config
+ * @returns {Promise<string|null>} the selected URL, or `null` when none is available.
  */
-export function selectWebhookUrl(payment, config) {
+export async function selectWebhookUrl(payment, config) {
   const perPayment = payment?.webhook_url;
   if (typeof perPayment === 'string' && perPayment.length > 0) {
     return perPayment;
   }
   if (config && typeof config.get === 'function') {
-    const fallback = config.get(DEFAULT_WEBHOOK_URL_KEY);
+    const fallback = await config.get(DEFAULT_WEBHOOK_URL_KEY);
     if (typeof fallback === 'string' && fallback.length > 0) {
       return fallback;
     }
@@ -302,14 +302,14 @@ export function createWebhookDispatcher(deps) {
    * API's resolution so the webhook and the API render the same wall-clock time.
    *
    * @param {Object} payment
-   * @returns {string}
+   * @returns {Promise<string>}
    */
-  function resolveDisplayTz(payment) {
+  async function resolveDisplayTz(payment) {
     if (isValidTimezone(payment?.tz)) {
       return payment.tz;
     }
     if (config && typeof config.get === 'function') {
-      const configured = config.get('display_timezone');
+      const configured = await config.get('display_timezone');
       if (isValidTimezone(configured)) {
         return configured;
       }
@@ -325,14 +325,14 @@ export function createWebhookDispatcher(deps) {
    *
    * @param {Object} payment
    * @param {('paid'|'expired')} event
-   * @returns {{ url: string, body: string, headers: Record<string, string> }|null}
+   * @returns {Promise<{ url: string, body: string, headers: Record<string, string> }|null>}
    */
-  function prepareRequest(payment, event) {
-    const url = selectWebhookUrl(payment, config);
+  async function prepareRequest(payment, event) {
+    const url = await selectWebhookUrl(payment, config);
     if (url === null) {
       return null;
     }
-    const payload = buildPayload(payment, event, resolveDisplayTz(payment));
+    const payload = buildPayload(payment, event, await resolveDisplayTz(payment));
     const body = serializeBody(payload);
     const signature = sign(body, hmacKey);
     return {
@@ -360,7 +360,7 @@ export function createWebhookDispatcher(deps) {
    */
   async function dispatch(payment, options = {}) {
     const event = options.event ?? PAID_EVENT;
-    const prepared = prepareRequest(payment, event);
+    const prepared = await prepareRequest(payment, event);
     if (prepared === null) {
       // No per-Payment URL and no Config default: do not send, not a failure,
       // and write no delivery log.
@@ -370,12 +370,13 @@ export function createWebhookDispatcher(deps) {
 
     let lastStatus;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      // eslint-disable-next-line no-await-in-loop
       const result = await attemptDelivery(url, headers, body);
       const timestamp = now();
       lastStatus = result.status;
 
       if (result.ok) {
-        webhookLogs.append({
+        await webhookLogs.append({
           id: generateId(),
           payment_id: payment.id,
           target_url: url,
@@ -394,7 +395,7 @@ export function createWebhookDispatcher(deps) {
       const logId = generateId();
       const lastError =
         result.error ?? `Non-2xx response status ${result.status ?? 'unknown'}`;
-      webhookLogs.append({
+      await webhookLogs.append({
         id: logId,
         payment_id: payment.id,
         target_url: url,
@@ -410,7 +411,7 @@ export function createWebhookDispatcher(deps) {
       if (attempt === MAX_ATTEMPTS) {
         // All attempts exhausted: mark the final row permanently failed and
         // stop retrying.
-        webhookLogs.markPermanentFailure(logId);
+        await webhookLogs.markPermanentFailure(logId);
         return {
           sent: true,
           success: false,
@@ -422,6 +423,7 @@ export function createWebhookDispatcher(deps) {
       }
 
       // Wait the bounded backoff delay before the next attempt.
+      // eslint-disable-next-line no-await-in-loop
       await sleep(backoffDelayMs(attempt));
     }
 
@@ -448,7 +450,7 @@ export function createWebhookDispatcher(deps) {
    */
   async function dispatchOnce(payment, options = {}) {
     const event = options.event ?? PAID_EVENT;
-    const prepared = prepareRequest(payment, event);
+    const prepared = await prepareRequest(payment, event);
     if (prepared === null) {
       // No per-Payment URL and no Config default: do not send, not a failure,
       // and write no delivery log.
@@ -459,7 +461,7 @@ export function createWebhookDispatcher(deps) {
     const result = await attemptDelivery(url, headers, body);
     const timestamp = now();
 
-    webhookLogs.append({
+    await webhookLogs.append({
       id: generateId(),
       payment_id: payment.id,
       target_url: url,

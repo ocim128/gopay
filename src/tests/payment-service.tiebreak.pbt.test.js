@@ -29,7 +29,7 @@ const VALID_STATIC_QRIS =
   '00020101021126610014COM.GO-JEK.WWW01189360091434970566750210G4970566750303UMI51440014ID.CO.QRIS.WWW0215ID10254118460050303UMI5204899953033605802ID5925Scalify Panel, Digital & 6015JAKARTA SELATAN61051200062070703A016304CD45';
 
 // A minimal Config Service stub: the Payment_Service only reads getStaticQris().
-const configStub = { getStaticQris: () => VALID_STATIC_QRIS };
+const configStub = { getStaticQris: async () => VALID_STATIC_QRIS };
 
 // The exact tie-break comparator used by handleTransactions: created_at
 // ascending, then id ascending (string comparison).
@@ -40,16 +40,16 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('settles exactly one matching payment — the earliest-created — and leaves the rest pending', () => {
-    fc.assert(
-      fc.property(
+  it('settles exactly one matching payment — the earliest-created — and leaves the rest pending', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // Centre Amount (also the incoming Transaction Amount). Kept well inside
         // the valid range so centre +/- delta never leaves 1000..9999000.
         fc.integer({ min: 2000_000, max: 9000_000 }),
@@ -70,7 +70,7 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
         fc.array(fc.integer({ min: 0, max: 5 }), { minLength: 2, maxLength: 6 }),
         // The settling Transaction id (idempotency key).
         fc.string({ minLength: 1, maxLength: 40 }),
-        (centre, deltas, ids, timeOffsets, txId) => {
+        async (centre, deltas, ids, timeOffsets, txId) => {
           // Use a common count across the three correlated arrays.
           const count = Math.min(deltas.length, ids.length, timeOffsets.length);
           fc.pre(count >= 2);
@@ -106,7 +106,7 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
           // Create each payment at its planned created_at with its planned id.
           for (const entry of plan) {
             clock = entry.created_at;
-            const created = service.createPayment({
+            const created = await service.createPayment({
               mode: 'client',
               amount: entry.amount,
               tolerance,
@@ -126,7 +126,7 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
 
           // Settle after every created_at but well within every lifetime.
           clock = base + 100;
-          const settled = service.handleTransactions([
+          const settled = await service.handleTransactions([
             { txId, amount: centre, type: 'payin', time: '2024-01-01T00:00:00.000Z', raw: {} },
           ]);
 
@@ -135,7 +135,7 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
           expect(settled[0].id).toBe(expectedWinner.id);
 
           // The winner is durably paid with the transaction's details.
-          const winnerStored = storage.payments.getById(expectedWinner.id);
+          const winnerStored = await storage.payments.getById(expectedWinner.id);
           expect(winnerStored.status).toBe('paid');
           expect(winnerStored.tx_id).toBe(txId);
 
@@ -144,15 +144,15 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
             if (entry.id === expectedWinner.id) {
               continue;
             }
-            expect(storage.payments.getById(entry.id).status).toBe('pending');
+            expect((await storage.payments.getById(entry.id)).status).toBe('pending');
           }
 
           // The active list contains exactly the losers (count - 1 payments).
-          const active = service.listActive({ limit: 100, offset: 0 });
+          const active = await service.listActive({ limit: 100, offset: 0 });
           expect(active).toHaveLength(count - 1);
           expect(active.some((p) => p.id === expectedWinner.id)).toBe(false);
 
-          storage.close();
+          await storage.close();
           storage = null;
         },
       ),

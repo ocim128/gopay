@@ -190,14 +190,14 @@ export function validateDisplayTimezone(value) {
  * @param {import('../dal/storage-interface.js').Storage} storage - a DAL
  *   storage instance (validated against the Storage contract).
  * @returns {{
- *   getPollInterval: () => number,
- *   setPollInterval: (value: unknown) => number,
- *   getDefaultWebhookUrl: () => (string|null),
- *   setDefaultWebhookUrl: (value: unknown) => string,
- *   getStaticQris: () => (string|null),
- *   setStaticQris: (value: unknown) => string,
- *   getDisplayTimezone: () => string,
- *   setDisplayTimezone: (value: unknown) => string,
+ *   getPollInterval: () => Promise<number>,
+ *   setPollInterval: (value: unknown) => Promise<number>,
+ *   getDefaultWebhookUrl: () => Promise<(string|null)>,
+ *   setDefaultWebhookUrl: (value: unknown) => Promise<string>,
+ *   getStaticQris: () => Promise<(string|null)>,
+ *   setStaticQris: (value: unknown) => Promise<string>,
+ *   getDisplayTimezone: () => Promise<string>,
+ *   setDisplayTimezone: (value: unknown) => Promise<string>,
  * }}
  */
 export function createConfigService(storage) {
@@ -207,10 +207,10 @@ export function createConfigService(storage) {
    * Read the Poll_Interval, falling back to {@link DEFAULT_POLL_INTERVAL_MS}
    * when it is unset or (defensively) stored in a non-integer form.
    *
-   * @returns {number}
+   * @returns {Promise<number>}
    */
-  function getPollInterval() {
-    const raw = storage.config.get(CONFIG_KEYS.POLL_INTERVAL);
+  async function getPollInterval() {
+    const raw = await storage.config.get(CONFIG_KEYS.POLL_INTERVAL);
     if (raw === null) {
       return DEFAULT_POLL_INTERVAL_MS;
     }
@@ -223,21 +223,21 @@ export function createConfigService(storage) {
    * left untouched.
    *
    * @param {unknown} value
-   * @returns {number} the stored integer Poll_Interval.
+   * @returns {Promise<number>} the stored integer Poll_Interval.
    * @throws {ConfigValidationError} when the value is invalid.
    */
-  function setPollInterval(value) {
+  async function setPollInterval(value) {
     const validated = validatePollInterval(value);
-    storage.config.set(CONFIG_KEYS.POLL_INTERVAL, String(validated));
+    await storage.config.set(CONFIG_KEYS.POLL_INTERVAL, String(validated));
     return validated;
   }
 
   /**
    * Read the default `webhook_url`, or `null` when none is configured.
    *
-   * @returns {string|null}
+   * @returns {Promise<string|null>}
    */
-  function getDefaultWebhookUrl() {
+  async function getDefaultWebhookUrl() {
     return storage.config.get(CONFIG_KEYS.WEBHOOK_URL);
   }
 
@@ -246,21 +246,21 @@ export function createConfigService(storage) {
    * value is left untouched.
    *
    * @param {unknown} value
-   * @returns {string} the stored URL.
+   * @returns {Promise<string>} the stored URL.
    * @throws {ConfigValidationError} when the value is invalid.
    */
-  function setDefaultWebhookUrl(value) {
+  async function setDefaultWebhookUrl(value) {
     const validated = validateWebhookUrl(value);
-    storage.config.set(CONFIG_KEYS.WEBHOOK_URL, validated);
+    await storage.config.set(CONFIG_KEYS.WEBHOOK_URL, validated);
     return validated;
   }
 
   /**
    * Read the Static_QRIS, or `null` when none is configured.
    *
-   * @returns {string|null}
+   * @returns {Promise<string|null>}
    */
-  function getStaticQris() {
+  async function getStaticQris() {
     return storage.config.get(CONFIG_KEYS.STATIC_QRIS);
   }
 
@@ -270,12 +270,12 @@ export function createConfigService(storage) {
    * payment time.
    *
    * @param {unknown} value
-   * @returns {string} the normalized, stored Static_QRIS.
+   * @returns {Promise<string>} the normalized, stored Static_QRIS.
    * @throws {ConfigValidationError} when the value is invalid.
    */
-  function setStaticQris(value) {
+  async function setStaticQris(value) {
     const validated = validateStaticQrisValue(value);
-    storage.config.set(CONFIG_KEYS.STATIC_QRIS, validated);
+    await storage.config.set(CONFIG_KEYS.STATIC_QRIS, validated);
     return validated;
   }
 
@@ -284,10 +284,10 @@ export function createConfigService(storage) {
    * {@link DEFAULT_DISPLAY_TIMEZONE} when unset or (defensively) stored as a
    * value no longer recognized as a valid IANA zone.
    *
-   * @returns {string}
+   * @returns {Promise<string>}
    */
-  function getDisplayTimezone() {
-    const raw = storage.config.get(CONFIG_KEYS.DISPLAY_TIMEZONE);
+  async function getDisplayTimezone() {
+    const raw = await storage.config.get(CONFIG_KEYS.DISPLAY_TIMEZONE);
     return isValidTimezone(raw) ? raw : DEFAULT_DISPLAY_TIMEZONE;
   }
 
@@ -297,12 +297,12 @@ export function createConfigService(storage) {
    * fields for Payments that carry no per-Payment `tz`.
    *
    * @param {unknown} value
-   * @returns {string} the stored timezone name.
+   * @returns {Promise<string>} the stored timezone name.
    * @throws {ConfigValidationError} when the value is not a valid IANA zone.
    */
-  function setDisplayTimezone(value) {
+  async function setDisplayTimezone(value) {
     const validated = validateDisplayTimezone(value);
-    storage.config.set(CONFIG_KEYS.DISPLAY_TIMEZONE, validated);
+    await storage.config.set(CONFIG_KEYS.DISPLAY_TIMEZONE, validated);
     return validated;
   }
 

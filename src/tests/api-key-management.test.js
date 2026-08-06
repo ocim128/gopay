@@ -35,37 +35,37 @@ describe('createApiKeyManager', () => {
     });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
   describe('createApiKey', () => {
-    it('returns the full value exactly once with active status', () => {
-      const created = manager.createApiKey();
+    it('returns the full value exactly once with active status', async () => {
+      const created = await manager.createApiKey();
       expect(created.value.startsWith(API_KEY_PREFIX)).toBe(true);
       expect(created.status).toBe('active');
       expect(created.created_at).toBe(1000);
       expect(created.key_prefix).toBe(deriveKeyPrefix(created.value));
     });
 
-    it('persists only the hash and prefix, never the plaintext', () => {
-      const created = manager.createApiKey();
+    it('persists only the hash and prefix, never the plaintext', async () => {
+      const created = await manager.createApiKey();
       // The stored record is retrievable by the hash of the revealed value.
-      const stored = storage.apiKeys.getActiveByHash(hashApiKey(created.value));
+      const stored = await storage.apiKeys.getActiveByHash(hashApiKey(created.value));
       expect(stored).not.toBeNull();
       expect(stored.key_hash).toBe(hashApiKey(created.value));
       // The full value is nowhere in the stored row.
       expect(JSON.stringify(stored)).not.toContain(created.value);
     });
 
-    it('creates unique values across keys', () => {
-      const a = manager.createApiKey();
-      const b = manager.createApiKey();
+    it('creates unique values across keys', async () => {
+      const a = await manager.createApiKey();
+      const b = await manager.createApiKey();
       expect(a.value).not.toBe(b.value);
       expect(a.id).not.toBe(b.id);
     });
 
-    it('retries when a generated value collides, then succeeds', () => {
+    it('retries when a generated value collides, then succeeds', async () => {
       const values = ['gpk_dupe', 'gpk_dupe', 'gpk_unique'];
       let i = 0;
       const retryingManager = createApiKeyManager(storage, {
@@ -73,16 +73,16 @@ describe('createApiKeyManager', () => {
         idFactory: () => `r-${i}`,
         generateValue: () => values[i++],
       });
-      expect(retryingManager.createApiKey().value).toBe('gpk_dupe');
+      expect((await retryingManager.createApiKey()).value).toBe('gpk_dupe');
       // Second call: first candidate collides on hash, second is unique.
-      expect(retryingManager.createApiKey().value).toBe('gpk_unique');
+      expect((await retryingManager.createApiKey()).value).toBe('gpk_unique');
     });
   });
 
   describe('listApiKeys', () => {
-    it('returns only masked forms, never the hash or full value', () => {
-      const created = manager.createApiKey();
-      const list = manager.listApiKeys();
+    it('returns only masked forms, never the hash or full value', async () => {
+      const created = await manager.createApiKey();
+      const list = await manager.listApiKeys();
       expect(list).toHaveLength(1);
       const masked = list[0];
       expect(masked).not.toHaveProperty('key_hash');
@@ -92,33 +92,33 @@ describe('createApiKeyManager', () => {
   });
 
   describe('revokeApiKey', () => {
-    it('revokes an active key and records the time', () => {
-      const created = manager.createApiKey();
+    it('revokes an active key and records the time', async () => {
+      const created = await manager.createApiKey();
       clock = 5000;
-      const res = manager.revokeApiKey(created.id);
+      const res = await manager.revokeApiKey(created.id);
       expect(res.ok).toBe(true);
       expect(res.value).toMatchObject({ id: created.id, status: 'revoked', revoked_at: 5000 });
       // The revoked key no longer authenticates.
-      expect(storage.apiKeys.getActiveByHash(hashApiKey(created.value))).toBeNull();
+      expect(await storage.apiKeys.getActiveByHash(hashApiKey(created.value))).toBeNull();
     });
 
-    it('rejects a non-existent key', () => {
-      expect(manager.revokeApiKey('does-not-exist')).toEqual({
+    it('rejects a non-existent key', async () => {
+      expect(await manager.revokeApiKey('does-not-exist')).toEqual({
         ok: false,
         code: 'KEY_NOT_REVOCABLE',
       });
     });
 
-    it('rejects an already-revoked key without changing it', () => {
-      const created = manager.createApiKey();
-      manager.revokeApiKey(created.id);
-      const again = manager.revokeApiKey(created.id);
+    it('rejects an already-revoked key without changing it', async () => {
+      const created = await manager.createApiKey();
+      await manager.revokeApiKey(created.id);
+      const again = await manager.revokeApiKey(created.id);
       expect(again).toEqual({ ok: false, code: 'KEY_NOT_REVOCABLE' });
     });
 
-    it('never leaks the hash in the revoke result', () => {
-      const created = manager.createApiKey();
-      const res = manager.revokeApiKey(created.id);
+    it('never leaks the hash in the revoke result', async () => {
+      const created = await manager.createApiKey();
+      const res = await manager.revokeApiKey(created.id);
       expect(res.value).not.toHaveProperty('key_hash');
     });
   });

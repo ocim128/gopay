@@ -52,16 +52,16 @@ describe('Property 28: API_Key invariants', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('creates unique active keys, reveals value once, stores only a hash, and revokes correctly', () => {
-    fc.assert(
-      fc.property(fc.array(opArb, { minLength: 1, maxLength: 60 }), (ops) => {
+  it('creates unique active keys, reveals value once, stores only a hash, and revokes correctly', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 60 }), async (ops) => {
         storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
 
         // A clock we advance once per operation so revoked_at is deterministic
@@ -80,7 +80,7 @@ describe('Property 28: API_Key invariants', () => {
           clock += 1;
 
           if (op.kind === 'create') {
-            const created = manager.createApiKey();
+            const created = await manager.createApiKey();
 
             // Initial status is active and the value is a fresh,
             // prefixed secret unique across all keys created so far.
@@ -97,7 +97,7 @@ describe('Property 28: API_Key invariants', () => {
             // value — proving a hash (not the plaintext) was stored. The full
             // value must not appear anywhere in the stored row.
             const hash = hashApiKey(created.value);
-            const stored = storage.apiKeys.getActiveByHash(hash);
+            const stored = await storage.apiKeys.getActiveByHash(hash);
             expect(stored).not.toBeNull();
             expect(stored.key_hash).toBe(hash);
             expect(JSON.stringify(stored)).not.toContain(created.value);
@@ -116,11 +116,11 @@ describe('Property 28: API_Key invariants', () => {
               // Revoking an id that was never created is rejected
               // and leaves every key untouched.
               const ghostId = `ghost-${bogusCounter++}`;
-              const res = manager.revokeApiKey(ghostId);
+              const res = await manager.revokeApiKey(ghostId);
               expect(res).toEqual({ ok: false, code: 'KEY_NOT_REVOCABLE' });
             } else {
               const victim = model[op.target % model.length];
-              const res = manager.revokeApiKey(victim.id);
+              const res = await manager.revokeApiKey(victim.id);
 
               if (victim.status === 'active') {
                 // active -> revoked, recording revoked_at = now.
@@ -133,7 +133,7 @@ describe('Property 28: API_Key invariants', () => {
                 expect(res.value).not.toHaveProperty('key_hash');
                 expect(JSON.stringify(res.value)).not.toContain(victim.value);
                 // A revoked key no longer authenticates by hash.
-                expect(storage.apiKeys.getActiveByHash(victim.hash)).toBeNull();
+                expect(await storage.apiKeys.getActiveByHash(victim.hash)).toBeNull();
                 victim.status = 'revoked';
                 victim.revokedAt = clock;
               } else {
@@ -146,7 +146,7 @@ describe('Property 28: API_Key invariants', () => {
           // After every op: the masked listing exposes only safe fields and
           // never the hash or any full value, and reflects the
           // model's status/revoked_at exactly.
-          const masked = manager.listApiKeys();
+          const masked = await manager.listApiKeys();
           expect(masked.length).toBe(model.length);
 
           const serialized = JSON.stringify(masked);
@@ -169,7 +169,7 @@ describe('Property 28: API_Key invariants', () => {
           }
         }
 
-        storage.close();
+        await storage.close();
         storage = null;
       }),
       { numRuns: 100 },

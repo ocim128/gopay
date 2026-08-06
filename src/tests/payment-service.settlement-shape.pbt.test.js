@@ -22,22 +22,22 @@ const VALID_STATIC_QRIS =
   '00020101021126610014COM.GO-JEK.WWW01189360091434970566750210G4970566750303UMI51440014ID.CO.QRIS.WWW0215ID10254118460050303UMI5204899953033605802ID5925Scalify Panel, Digital & 6015JAKARTA SELATAN61051200062070703A016304CD45';
 
 // A minimal Config Service stub: the Payment_Service only reads getStaticQris().
-const configStub = { getStaticQris: () => VALID_STATIC_QRIS };
+const configStub = { getStaticQris: async () => VALID_STATIC_QRIS };
 
 describe('Property 11: Settlement data shape', () => {
   /** @type {import('../dal/storage-interface.js').Storage | null} */
   let storage = null;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (storage) {
-      storage.close();
+      await storage.close();
       storage = null;
     }
   });
 
-  it('a paid payment stores and returns txId, paid_amount, and paid_at', () => {
-    fc.assert(
-      fc.property(
+  it('a paid payment stores and returns txId, paid_amount, and paid_at', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // Base amount kept comfortably above the max tolerance so a negative
         // delta can never push the transaction amount below 1 Rupiah.
         fc.integer({ min: 1000_000, max: 9999000 }),
@@ -47,7 +47,7 @@ describe('Property 11: Settlement data shape', () => {
         fc.string({ minLength: 1, maxLength: 40 }),
         // Settlement clock offset (ms) kept inside the default 300000ms timeout.
         fc.integer({ min: 0, max: 250_000 }),
-        (amount, tolerance, txId, settleOffset) => {
+        async (amount, tolerance, txId, settleOffset) => {
           // Fresh in-memory storage per run so amounts never collide across runs.
           storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
 
@@ -59,7 +59,7 @@ describe('Property 11: Settlement data shape', () => {
             now: () => clock,
           });
 
-          const payment = service.createPayment({
+          const payment = await service.createPayment({
             mode: 'client',
             amount,
             tolerance,
@@ -73,21 +73,21 @@ describe('Property 11: Settlement data shape', () => {
 
           // Settle within the payment's lifetime.
           clock = createdAt + settleOffset;
-          const settled = service.handleTransactions([
+          const settled = await service.handleTransactions([
             { txId, amount: txAmount, type: 'payin', time: '2024-01-01T00:00:00.000Z', raw: {} },
           ]);
 
           expect(settled.map((p) => p.id)).toEqual([payment.id]);
 
           // The returned Payment carries the full settlement triple.
-          const read = service.getPayment(payment.id);
+          const read = await service.getPayment(payment.id);
           expect(read).not.toBeNull();
           expect(read.status).toBe('paid');
           expect(read.tx_id).toBe(txId);
           expect(read.paid_amount).toBe(txAmount);
           expect(read.paid_at).toBe(clock);
 
-          storage.close();
+          await storage.close();
           storage = null;
         },
       ),

@@ -35,7 +35,7 @@ describe('Payment_Service expiry notification', () => {
     expiredEvents = [];
     service = createPaymentService({
       storage,
-      config: { getStaticQris: () => STATIC_QRIS },
+      config: { getStaticQris: async () => STATIC_QRIS },
       onExpired: (payment) => {
         expiredEvents.push(payment);
       },
@@ -43,8 +43,8 @@ describe('Payment_Service expiry notification', () => {
     });
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
   /**
@@ -56,13 +56,13 @@ describe('Payment_Service expiry notification', () => {
     return service.createPayment({ mode: PAYMENT_MODE.CLIENT, amount, timeout });
   }
 
-  it('fires onExpired exactly once when a pending payment is read after expiry (getPayment)', () => {
-    const payment = createPending(25000, 10000);
+  it('fires onExpired exactly once when a pending payment is read after expiry (getPayment)', async () => {
+    const payment = await createPending(25000, 10000);
     expect(expiredEvents).toHaveLength(0);
 
     // Move past expires_at and read it back.
     clock = payment.expires_at + 1;
-    const read = service.getPayment(payment.id);
+    const read = await service.getPayment(payment.id);
 
     expect(read.status).toBe('expired');
     expect(expiredEvents).toHaveLength(1);
@@ -70,15 +70,15 @@ describe('Payment_Service expiry notification', () => {
     expect(expiredEvents[0].status).toBe('expired');
 
     // A second read must NOT fire the hook again (exactly-once).
-    service.getPayment(payment.id);
+    await service.getPayment(payment.id);
     expect(expiredEvents).toHaveLength(1);
   });
 
-  it('fires onExpired via listActive when a payment is overdue', () => {
-    const payment = createPending(26000, 10000);
+  it('fires onExpired via listActive when a payment is overdue', async () => {
+    const payment = await createPending(26000, 10000);
     clock = payment.expires_at + 1;
 
-    const active = service.listActive();
+    const active = await service.listActive();
     // The expired payment is no longer active...
     expect(active.find((p) => p.id === payment.id)).toBeUndefined();
     // ...and its expiry fired exactly once.
@@ -86,49 +86,49 @@ describe('Payment_Service expiry notification', () => {
     expect(expiredEvents[0].id).toBe(payment.id);
   });
 
-  it('fires onExpired on a poll tick even with an empty transaction batch (handleTransactions)', () => {
-    const payment = createPending(27000, 10000);
+  it('fires onExpired on a poll tick even with an empty transaction batch (handleTransactions)', async () => {
+    const payment = await createPending(27000, 10000);
     clock = payment.expires_at + 1;
 
     // An empty batch still runs the expiry sweep (this is what the poller passes
     // when GoBiz returns no transactions).
-    service.handleTransactions([]);
+    await service.handleTransactions([]);
 
     expect(expiredEvents).toHaveLength(1);
     expect(expiredEvents[0].id).toBe(payment.id);
-    expect(service.getPayment(payment.id).status).toBe('expired');
+    expect((await service.getPayment(payment.id)).status).toBe('expired');
   });
 
-  it('fires onExpired once per payment for several overdue payments, and not for still-pending ones', () => {
-    const a = createPending(1001, 10000);
-    const b = createPending(1002, 10000);
-    const c = createPending(1003, 60000); // longer timeout — still pending
+  it('fires onExpired once per payment for several overdue payments, and not for still-pending ones', async () => {
+    const a = await createPending(1001, 10000);
+    const b = await createPending(1002, 10000);
+    const c = await createPending(1003, 60000); // longer timeout — still pending
 
     clock = a.expires_at + 1; // past a and b (10s) but not c (60s)
-    service.handleTransactions([]);
+    await service.handleTransactions([]);
 
     const ids = expiredEvents.map((p) => p.id).sort();
     expect(ids).toEqual([a.id, b.id].sort());
     expect(expiredEvents.every((p) => p.status === 'expired')).toBe(true);
     // c is untouched.
-    expect(service.getPayment(c.id).status).toBe('pending');
+    expect((await service.getPayment(c.id)).status).toBe('pending');
     // Re-running the sweep does not re-fire for a or b.
-    service.handleTransactions([]);
+    await service.handleTransactions([]);
     expect(expiredEvents).toHaveLength(2);
   });
 
-  it('does not fire onExpired for a payment that was paid before expiry', () => {
-    const payment = createPending(28000, 10000);
-    storage.payments.markPaid(payment.id, {
+  it('does not fire onExpired for a payment that was paid before expiry', async () => {
+    const payment = await createPending(28000, 10000);
+    await storage.payments.markPaid(payment.id, {
       txId: 'tx-paid',
       paidAmount: 28000,
       paidAt: clock,
     });
 
     clock = payment.expires_at + 1;
-    service.handleTransactions([]);
+    await service.handleTransactions([]);
 
     expect(expiredEvents).toHaveLength(0);
-    expect(service.getPayment(payment.id).status).toBe('paid');
+    expect((await service.getPayment(payment.id)).status).toBe('paid');
   });
 });

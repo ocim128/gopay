@@ -401,3 +401,106 @@ describe('SharedPoller — periodic maintenance', () => {
     expect(poller.running).toBe(true);
   });
 });
+
+describe('SharedPoller — async scheduler lifecycle races', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stop() racing ensureRunning() leaves no pending timer', async () => {
+    // An ASYNC getActiveCount (like the real storage countActive) means
+    // ensureRunning's schedule awaits the count. A stop() that lands during
+    // that await must not let a timer be installed afterward.
+    let resolveCount;
+    const client = makeFakeClient([]);
+    const poller = new SharedPoller(client, {
+      getActiveCount: () =>
+        new Promise((resolve) => {
+          resolveCount = resolve;
+        }),
+      onTransactions: () => {},
+      getPollInterval: () => 5000,
+      pollImmediately: false,
+    });
+
+    // Start the loop: scheduling waits on the unresolved count Promise.
+    const started = poller.ensureRunning();
+    expect(poller.running).toBe(true);
+    // Let the scheduling chain reach the count getter so it assigns the
+    // resolver (the chain runs its body on the next microtask).
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // While the schedule is waiting on the count, stop the loop.
+    const stopped = poller.stop();
+    // Now release the count: the in-flight schedule observes _running === false
+    // and must NOT install a timer.
+    resolveCount(1);
+    await Promise.all([started, stopped]);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // No timer was ever installed, so no poll ever fired.
+    expect(client.getRecentTransactions).not.toHaveBeenCalled();
+    expect(poller.running).toBe(false);
+  });
+
+  it('concurrent reschedules install at most one timer', async () => {
+    // Two concurrent _scheduleNext calls (e.g. ensureRunning + setInterval)
+    // must never leave two live timers at once. The scheduler serializes them
+    // via the _scheduling chain: each link clears the prior timer before
+    // awaiting and installs its own after, so the set of live handles never
+    // grows beyond one.
+    /** Tracks the currently live (not-yet-cleared) timer handles. */
+    const liveHandles = new Set();
+    let maxLive = 0;
+    const client = makeFakeClient([]);
+    const poller = new SharedPoller(client, {
+      getActiveCount: async () => 1,
+      onTransactions: () => {},
+      getPollInterval: () => 5000,
+      setTimeoutFn: (handler, ms) => {
+        const handle = globalThis.setTimeout(handler, ms);
+        liveHandles.add(handle);
+        maxLive = Math.max(maxLive, liveHandles.size);
+        return handle;
+      },
+      clearTimeoutFn: (handle) => {
+        liveHandles.delete(handle);
+        globalThis.clearTimeout(handle);
+      },
+      pollImmediately: false,
+    });
+
+    // Fire two concurrent reschedules before either settles.
+    const a = poller.ensureRunning();
+    const b = poller.setInterval(7000);
+    await Promise.all([a, b]);
+
+    // At no point during the concurrent reschedules did two timers coexist.
+    expect(maxLive).toBeLessThanOrEqual(1);
+    // After both settle, exactly one pending timer remains.
+    expect(poller._timer).not.toBeNull();
+
+    // Stop before the timer fires so the test does not drive a full cycle.
+    await poller.stop();
+    expect(poller._timer).toBeNull();
+    expect(liveHandles.size).toBe(0);
+  });
+
+  it('an async config getter rejection does not surface as unhandled', async () => {
+    // The constructor calls the sync-or-async config getter; when it returns a
+    // rejected Promise the rejection must be swallowed (logged), not leak.
+    const client = makeFakeClient([]);
+    const poller = new SharedPoller(client, {
+      getActiveCount: () => 0,
+      onTransactions: () => {},
+      getPollInterval: () => Promise.reject(new Error('config down')),
+    });
+    // _baseInterval fell back to the default rather than a Promise.
+    expect(poller.baseInterval).toBeGreaterThanOrEqual(DEFAULT_MIN_INTERVAL_MS);
+    expect(typeof poller.baseInterval).toBe('number');
+  });
+});

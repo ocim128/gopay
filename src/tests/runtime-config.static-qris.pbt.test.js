@@ -79,19 +79,19 @@ describe('Property 36: Static_QRIS validation on Config set', () => {
     config = createConfigService(storage);
   });
 
-  afterEach(() => {
-    storage.close();
+  afterEach(async () => {
+    await storage.close();
   });
 
-  it('rejects invalid payloads with ConfigValidationError (HTTP 400) and retains the previous value', () => {
-    fc.assert(
-      fc.property(invalidCandidateArb, (bad) => {
+  it('rejects invalid payloads with ConfigValidationError (HTTP 400) and retains the previous value', async () => {
+    await fc.assert(
+      fc.asyncProperty(invalidCandidateArb, async (bad) => {
         // Establish a known-good previously stored value.
-        config.setStaticQris(VALID_STATIC_QRIS);
+        await config.setStaticQris(VALID_STATIC_QRIS);
 
         let thrown;
         try {
-          config.setStaticQris(bad);
+          await config.setStaticQris(bad);
           thrown = null;
         } catch (err) {
           thrown = err;
@@ -103,7 +103,7 @@ describe('Property 36: Static_QRIS validation on Config set', () => {
         expect(thrown.code).toBe('INVALID_REQUEST');
 
         // Nothing was written: the previous value is retained unchanged.
-        expect(config.getStaticQris()).toBe(VALID_STATIC_QRIS);
+        expect(await config.getStaticQris()).toBe(VALID_STATIC_QRIS);
       }),
       { numRuns: 100 },
     );
@@ -127,18 +127,18 @@ describe('Property 36: Static_QRIS validation on Config set', () => {
     );
   });
 
-  it('accepts a valid Static_QRIS, normalizes it, and persists it through the DAL', () => {
-    fc.assert(
-      fc.property(validCandidateArb, (candidate) => {
-        const stored = config.setStaticQris(candidate);
+  it('accepts a valid Static_QRIS, normalizes it, and persists it through the DAL', async () => {
+    await fc.assert(
+      fc.asyncProperty(validCandidateArb, async (candidate) => {
+        const stored = await config.setStaticQris(candidate);
 
         // The stored value is the trimmed, canonical Static_QRIS.
         expect(stored).toBe(VALID_STATIC_QRIS);
-        expect(config.getStaticQris()).toBe(VALID_STATIC_QRIS);
+        expect(await config.getStaticQris()).toBe(VALID_STATIC_QRIS);
 
         // Persistence: a fresh service over the same storage reads it back.
         const reopened = createConfigService(storage);
-        expect(reopened.getStaticQris()).toBe(VALID_STATIC_QRIS);
+        expect(await reopened.getStaticQris()).toBe(VALID_STATIC_QRIS);
       }),
       { numRuns: 100 },
     );

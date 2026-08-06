@@ -118,9 +118,9 @@ export function extractCredential(headers) {
  *
  * @param {string} apiKey - The presented (non-blank) API key.
  * @param {import('../dal/storage-interface.js').Storage} storage
- * @returns {import('../dal/storage-interface.js').ApiKeyRecord|null}
+ * @returns {Promise<import('../dal/storage-interface.js').ApiKeyRecord|null>}
  */
-export function resolveApiKey(apiKey, storage) {
+export async function resolveApiKey(apiKey, storage) {
   let computedHash;
   try {
     computedHash = hashApiKey(apiKey);
@@ -130,7 +130,7 @@ export function resolveApiKey(apiKey, storage) {
 
   // getActiveByHash returns the record only when it exists AND is active;
   // missing or revoked keys resolve to null.
-  const record = storage.apiKeys.getActiveByHash(computedHash);
+  const record = await storage.apiKeys.getActiveByHash(computedHash);
   if (record === null || record === undefined) {
     return null;
   }
@@ -179,7 +179,7 @@ export function createApiKeyAuthPreHandler({ storage } = {}) {
       return reply.code(http).send(body);
     }
 
-    const record = resolveApiKey(credential.value, storage);
+    const record = await resolveApiKey(credential.value, storage);
     if (record === null) {
       // No active key matched, or the matched key is revoked.
       return reply.code(http).send(body);

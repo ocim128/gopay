@@ -103,9 +103,9 @@ export class PaymentError extends Error {
  *
  * @param {Object} deps
  * @param {import('../dal/storage-interface.js').Storage} deps.storage - the DAL.
- * @param {{ getStaticQris: () => (string|null) }} deps.config - the Config
- *   Service (only `getStaticQris` is used here); supplies the Static_QRIS the
- *   QRIS_Builder reads from.
+ * @param {{ getStaticQris: () => Awaitable<(string|null)> }} deps.config - the
+ *   Config Service (only `getStaticQris` is used here); supplies the Static_QRIS
+ *   the QRIS_Builder reads from. The call is awaited.
  * @param {() => void} [deps.ensureRunning] - optional poller hook invoked after a
  *   pending Payment is created so the Shared_Poller can start/keep running.
  * @param {(payment: import('../dal/storage-interface.js').Payment, transaction: Transaction) => void} [deps.onSettled]
@@ -127,10 +127,10 @@ export class PaymentError extends Error {
  * @param {() => string} [deps.idFactory] - id generator; defaults to
  *   `crypto.randomUUID`.
  * @returns {{
- *   createPayment: (input?: object) => import('../dal/storage-interface.js').Payment,
- *   getPayment: (id: string) => (import('../dal/storage-interface.js').Payment|null),
- *   listActive: (options?: import('../dal/storage-interface.js').ListOptions) => import('../dal/storage-interface.js').Payment[],
- *   handleTransactions: (transactions?: Transaction[]) => import('../dal/storage-interface.js').Payment[],
+ *   createPayment: (input?: object) => Promise<import('../dal/storage-interface.js').Payment>,
+ *   getPayment: (id: string) => Promise<(import('../dal/storage-interface.js').Payment|null)>,
+ *   listActive: (options?: import('../dal/storage-interface.js').ListOptions) => Promise<import('../dal/storage-interface.js').Payment[]>,
+ *   handleTransactions: (transactions?: Transaction[]) => Promise<import('../dal/storage-interface.js').Payment[]>,
  * }}
  */
 export function createPaymentService(deps = {}) {
@@ -199,13 +199,13 @@ export function createPaymentService(deps = {}) {
    * @param {string|null} [input.webhook_url] - per-Payment webhook override.
    * @param {string|null} [input.tz] - optional per-Payment IANA display
    *   timezone used to render the Payment's `_iso` timestamp fields.
-   * @returns {import('../dal/storage-interface.js').Payment} the stored Payment.
+   * @returns {Promise<import('../dal/storage-interface.js').Payment>} the stored Payment.
    * @throws {PaymentError} with `INVALID_REQUEST` (bad mode) or `AMOUNT_IN_USE`.
    * @throws {import('./amount-allocator.js').AmountAllocationError} with
    *   `INVALID_AMOUNT`, `INVALID_BASE_AMOUNT`, or `NO_AVAILABLE_AMOUNT`.
    * @throws {import('./qris-builder.js').QrisError} with `QRIS_INVALID`.
    */
-  function createPayment(input = {}) {
+  async function createPayment(input = {}) {
     const mode = input.mode;
     if (mode !== PAYMENT_MODE.CLIENT && mode !== PAYMENT_MODE.SERVER) {
       throw new PaymentError(
@@ -230,7 +230,8 @@ export function createPaymentService(deps = {}) {
       // given (or null to fall back to the server default zone).
       tz: input.tz ?? null,
       // Read the Static_QRIS once; the QRIS_Builder validates it per build.
-      staticQris: config.getStaticQris(),
+      // The config service reads through the (async) DAL, so this is awaited.
+      staticQris: await config.getStaticQris(),
     };
 
     /** @type {import('../dal/storage-interface.js').Payment} */
@@ -239,7 +240,7 @@ export function createPaymentService(deps = {}) {
     if (mode === PAYMENT_MODE.CLIENT) {
       const amount = validateClientAmount(input.amount);
       const record = buildPendingRecord(amount, ctx);
-      const result = storage.payments.insertPending(record);
+      const result = await storage.payments.insertPending(record);
       if (!result.ok) {
         if (result.code === 'AMOUNT_IN_USE') {
           throw new PaymentError('AMOUNT_IN_USE');
@@ -252,9 +253,11 @@ export function createPaymentService(deps = {}) {
       // allocateServerAmount drives the suffix scan; the attempt performs the
       // real atomic insert. A truthy return means success; `false` means the
       // candidate Amount is taken (retry the next suffix); anything else throws.
-      const allocation = allocateServerAmount(baseAmount, (candidateAmount) => {
+      // The attempt is async (the storage insert returns a Promise) so each
+      // candidate is fully resolved before the next suffix is tried.
+      const allocation = await allocateServerAmount(baseAmount, async (candidateAmount) => {
         const record = buildPendingRecord(candidateAmount, ctx);
-        const result = storage.payments.insertPending(record);
+        const result = await storage.payments.insertPending(record);
         if (result.ok) {
           return result.value;
         }
@@ -294,12 +297,12 @@ export function createPaymentService(deps = {}) {
    * already carries the settlement details `tx_id`, `paid_amount`, and `paid_at`.
    *
    * @param {string} id
-   * @returns {import('../dal/storage-interface.js').Payment|null} the Payment, or
-   *   `null` when no Payment exists for `id` (the route maps this to
+   * @returns {Promise<import('../dal/storage-interface.js').Payment|null>} the
+   *   Payment, or `null` when no Payment exists for `id` (the route maps this to
    *   `PAYMENT_NOT_FOUND`).
    */
-  function getPayment(id) {
-    let payment = storage.payments.getById(id);
+  async function getPayment(id) {
+    let payment = await storage.payments.getById(id);
     if (!payment) {
       return null;
     }
@@ -309,8 +312,8 @@ export function createPaymentService(deps = {}) {
       // expireOverdue flips every overdue pending Payment to `expired`; re-read
       // this one to return its updated status. Routing through expireAndNotify
       // also fires the expiry webhook for any Payment that just transitioned.
-      expireAndNotify(at);
-      payment = storage.payments.getById(id);
+      await expireAndNotify(at);
+      payment = await storage.payments.getById(id);
     }
 
     return payment;
@@ -323,10 +326,10 @@ export function createPaymentService(deps = {}) {
    *
    * @param {import('../dal/storage-interface.js').ListOptions} [options]
    *   pagination (`limit` 1..100 default 100, `offset` >= 0 default 0).
-   * @returns {import('../dal/storage-interface.js').Payment[]}
+   * @returns {Promise<import('../dal/storage-interface.js').Payment[]>}
    */
-  function listActive(options = {}) {
-    expireAndNotify(now());
+  async function listActive(options = {}) {
+    await expireAndNotify(now());
     return storage.payments.listActive(options);
   }
 
@@ -336,17 +339,18 @@ export function createPaymentService(deps = {}) {
    * ordered by `expires_at` ascending (the DAL's order); callers that need the
    * earliest-created tie-break re-sort by `created_at` themselves.
    *
-   * @returns {import('../dal/storage-interface.js').Payment[]}
+   * @returns {Promise<import('../dal/storage-interface.js').Payment[]>}
    */
-  function gatherActive() {
+  async function gatherActive() {
     const PAGE = 100;
     /** @type {import('../dal/storage-interface.js').Payment[]} */
     const all = [];
     let offset = 0;
-    // better-sqlite3 is synchronous and single-tenant, so this snapshot is
-    // consistent for the duration of one matching pass.
+    // Each page is awaited in turn so an asynchronous backend (MongoDB) returns
+    // a consistent snapshot before the next page is requested.
     for (;;) {
-      const page = storage.payments.listActive({ limit: PAGE, offset });
+      // eslint-disable-next-line no-await-in-loop
+      const page = await storage.payments.listActive({ limit: PAGE, offset });
       all.push(...page);
       if (page.length < PAGE) {
         break;
@@ -406,18 +410,17 @@ export function createPaymentService(deps = {}) {
 
   /**
    * Expire every overdue pending Payment and fire the expiry hook exactly once
-   * per Payment that transitioned. When the DAL exposes
-   * `expireOverdueReturning` (returns the rows it flipped via SQL RETURNING),
-   * each newly-expired Payment is handed to {@link notifyExpired}. Backends
-   * without that method fall back to the count-only `expireOverdue`, in which
-   * case no expiry notification is emitted (used only by lightweight test mocks).
+   * per Payment that transitioned. Every backend must implement
+   * `expireOverdueReturning` (it is now part of the Storage contract): it
+   * returns the rows it flipped, so each newly-expired Payment is handed to
+   * {@link notifyExpired} exactly once.
    *
    * @param {number} at - epoch ms.
-   * @returns {number} how many Payments were expired.
+   * @returns {Promise<number>} how many Payments were expired.
    */
-  function expireAndNotify(at) {
+  async function expireAndNotify(at) {
     if (typeof storage.payments.expireOverdueReturning === 'function') {
-      const expired = storage.payments.expireOverdueReturning(at);
+      const expired = await storage.payments.expireOverdueReturning(at);
       if (Array.isArray(expired) && expired.length > 0) {
         for (const payment of expired) {
           notifyExpired(payment);
@@ -455,10 +458,10 @@ export function createPaymentService(deps = {}) {
    * again.
    *
    * @param {Transaction[]} [transactions] - the broadcast transactions.
-   * @returns {import('../dal/storage-interface.js').Payment[]} the Payment
+   * @returns {Promise<import('../dal/storage-interface.js').Payment[]>} the Payment
    *   settled by this batch, in settlement order.
    */
-  function handleTransactions(transactions = []) {
+  async function handleTransactions(transactions = []) {
     const batch = Array.isArray(transactions) ? transactions : [];
 
     const at = now();
@@ -466,7 +469,7 @@ export function createPaymentService(deps = {}) {
     // runs on every poll tick — even when `batch` is empty — so expiry is
     // detected promptly without waiting for a read. An expired Payment is not an
     // Active_Payment and must never be settled.
-    expireAndNotify(at);
+    await expireAndNotify(at);
 
     if (batch.length === 0) {
       return [];
@@ -478,13 +481,13 @@ export function createPaymentService(deps = {}) {
     // test mocks and backends that do not implement the method.
     const hasIndexedLookup = typeof storage.payments.findCandidatesByAmount === 'function';
     /** @type {import('../dal/storage-interface.js').Payment[]|null} */
-    const active = hasIndexedLookup ? null : gatherActive();
+    const active = hasIndexedLookup ? null : await gatherActive();
     // The widest tolerance among active payments, used to widen the indexed
     // range scan so it covers every payment's own tolerance window. Computed
     // once per batch (a single scalar query); 0 on the snapshot path.
     const tolerancePad =
       hasIndexedLookup && typeof storage.payments.maxActiveTolerance === 'function'
-        ? storage.payments.maxActiveTolerance()
+        ? await storage.payments.maxActiveTolerance()
         : 0;
     /** @type {Set<string>} ids settled within this batch (no double-match). */
     const consumed = new Set();
@@ -518,11 +521,9 @@ export function createPaymentService(deps = {}) {
       } else {
         const lo = tx.amount - tolerancePad;
         const hi = tx.amount + tolerancePad;
-        candidates = storage.payments
-          .findCandidatesByAmount(lo, hi)
-          .filter(
-            (p) => !consumed.has(p.id) && Math.abs(tx.amount - p.amount) <= p.tolerance,
-          );
+        candidates = (
+          await storage.payments.findCandidatesByAmount(lo, hi)
+        ).filter((p) => !consumed.has(p.id) && Math.abs(tx.amount - p.amount) <= p.tolerance);
         // The DAL already returns rows ordered by (created_at ASC, id ASC), so
         // the tie-break is stable without an additional sort.
       }
@@ -535,7 +536,8 @@ export function createPaymentService(deps = {}) {
       // Try candidates in order until one settles. markPaid is the single source
       // of truth for txId idempotency and the pending->paid transition.
       for (const candidate of candidates) {
-        const result = storage.payments.markPaid(candidate.id, {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await storage.payments.markPaid(candidate.id, {
           txId: tx.txId,
           paidAmount: tx.amount,
           paidAt: at,

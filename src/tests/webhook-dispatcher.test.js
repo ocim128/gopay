@@ -102,27 +102,27 @@ const PAYMENT = {
 };
 
 describe('selectWebhookUrl', () => {
-  it('prefers the per-Payment webhook_url', () => {
-    const config = { get: () => 'https://config.example/hook' };
-    expect(selectWebhookUrl({ webhook_url: 'https://pay.example/hook' }, config)).toBe(
+  it('prefers the per-Payment webhook_url', async () => {
+    const config = { get: async () => 'https://config.example/hook' };
+    expect(await selectWebhookUrl({ webhook_url: 'https://pay.example/hook' }, config)).toBe(
       'https://pay.example/hook',
     );
   });
 
-  it('falls back to the Config default when the payment has none', () => {
-    const config = { get: () => 'https://config.example/hook' };
-    expect(selectWebhookUrl({ webhook_url: null }, config)).toBe('https://config.example/hook');
+  it('falls back to the Config default when the payment has none', async () => {
+    const config = { get: async () => 'https://config.example/hook' };
+    expect(await selectWebhookUrl({ webhook_url: null }, config)).toBe('https://config.example/hook');
   });
 
-  it('returns null when neither source provides a URL', () => {
-    const config = { get: () => null };
-    expect(selectWebhookUrl({ webhook_url: null }, config)).toBeNull();
-    expect(selectWebhookUrl({}, null)).toBeNull();
+  it('returns null when neither source provides a URL', async () => {
+    const config = { get: async () => null };
+    expect(await selectWebhookUrl({ webhook_url: null }, config)).toBeNull();
+    expect(await selectWebhookUrl({}, null)).toBeNull();
   });
 
-  it('ignores an empty-string per-Payment URL and uses the default', () => {
-    const config = { get: () => 'https://config.example/hook' };
-    expect(selectWebhookUrl({ webhook_url: '' }, config)).toBe('https://config.example/hook');
+  it('ignores an empty-string per-Payment URL and uses the default', async () => {
+    const config = { get: async () => 'https://config.example/hook' };
+    expect(await selectWebhookUrl({ webhook_url: '' }, config)).toBe('https://config.example/hook');
   });
 });
 

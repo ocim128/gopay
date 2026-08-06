@@ -173,23 +173,30 @@ export function findFreeSuffix(baseAmount, usedSuffixes = []) {
  * signal that the candidate is already taken (for example, a UNIQUE constraint
  * violation). Allocation stops at the first success.
  *
+ * The attempt function MAY be asynchronous (return a Promise): the allocation
+ * loop awaits each attempt before trying the next suffix. This is required for
+ * asynchronous storage backends (MongoDB), where the insert result is only
+ * known after the round-trip resolves. A synchronous attempt (SQLite) is still
+ * accepted and awaited uniformly.
+ *
  * Candidates whose formed Amount would exceed the maximum valid Amount are
  * skipped so the resulting Amount is always a valid payment Amount.
  *
  * @template T
  * @param {number} baseAmount - the validated Base_Amount.
- * @param {(candidateAmount: number, suffix: number) => (T|false|null|undefined)} attempt
- *   the allocation attempt; returns a truthy result on success or a falsy value
- *   when the candidate Amount is already in use.
+ * @param {(candidateAmount: number, suffix: number) => (Promise<(T|false|null|undefined)>|(T|false|null|undefined))} attempt
+ *   the allocation attempt; returns (or resolves to) a truthy result on success
+ *   or a falsy value when the candidate Amount is already in use.
  * @param {object} [options]
  * @param {number} [options.maxAttempts=1000] - the maximum number of attempts
  *   to make (defaults to the 1000 suffix slots).
- * @returns {{ amount: number, suffix: number, result: T }} the successfully
- *   allocated Amount, its suffix, and the truthy result returned by `attempt`.
+ * @returns {Promise<{ amount: number, suffix: number, result: T }>} the
+ *   successfully allocated Amount, its suffix, and the truthy result returned
+ *   by `attempt`.
  * @throws {AmountAllocationError} with code `NO_AVAILABLE_AMOUNT` when no free
  *   slot remains within the attempt budget.
  */
-export function allocateServerAmount(baseAmount, attempt, options = {}) {
+export async function allocateServerAmount(baseAmount, attempt, options = {}) {
   if (typeof attempt !== 'function') {
     throw new TypeError('allocateServerAmount requires an attempt function.');
   }
@@ -209,7 +216,11 @@ export function allocateServerAmount(baseAmount, attempt, options = {}) {
     }
 
     attempts += 1;
-    const result = attempt(candidateAmount, suffix);
+    // Await every attempt so an asynchronous storage backend (MongoDB) resolves
+    // the insert before we try the next suffix. A synchronous attempt is
+    // awaited harmlessly.
+    // eslint-disable-next-line no-await-in-loop
+    const result = await attempt(candidateAmount, suffix);
     if (result) {
       return { amount: candidateAmount, suffix, result };
     }

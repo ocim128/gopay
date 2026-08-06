@@ -149,9 +149,9 @@ function mutableSchema(schema) {
  * @param {import('fastify').FastifyInstance} fastify
  * @param {{
  *   paymentService: {
- *     createPayment: (input?: object) => import('../dal/storage-interface.js').Payment,
- *     getPayment: (id: string) => (import('../dal/storage-interface.js').Payment|null),
- *     listActive: (options?: import('../dal/storage-interface.js').ListOptions) => import('../dal/storage-interface.js').Payment[],
+ *     createPayment: (input?: object) => Promise<import('../dal/storage-interface.js').Payment>,
+ *     getPayment: (id: string) => Promise<(import('../dal/storage-interface.js').Payment|null)>,
+ *     listActive: (options?: import('../dal/storage-interface.js').ListOptions) => Promise<import('../dal/storage-interface.js').Payment[]>,
  *   },
  *   storage?: import('../dal/storage-interface.js').Storage,
  *   authPreHandler?: (request: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => unknown,
@@ -183,10 +183,12 @@ export default async function paymentsRoutes(fastify, opts = {}) {
    * Payment's own `tz` when set, otherwise the server-configured default,
    * otherwise {@link DISPLAY_TIMEZONE}.
    *
+   * The Config Service reads through the (async) DAL, so this is awaited.
+   *
    * @param {{ tz?: string|null }} payment
-   * @returns {string}
+   * @returns {Promise<string>}
    */
-  function resolveDisplayTz(payment) {
+  async function resolveDisplayTz(payment) {
     if (isValidTimezone(payment?.tz)) {
       return payment.tz;
     }
@@ -254,12 +256,12 @@ export default async function paymentsRoutes(fastify, opts = {}) {
 
     let payment;
     try {
-      payment = paymentService.createPayment(input);
+      payment = await paymentService.createPayment(input);
     } catch (err) {
       return sendDomainError(reply, err);
     }
 
-    const tz = resolveDisplayTz(payment);
+    const tz = await resolveDisplayTz(payment);
     return reply.code(201).send({
       id: payment.id,
       status: payment.status,
@@ -283,14 +285,14 @@ export default async function paymentsRoutes(fastify, opts = {}) {
   // PAYMENT_NOT_FOUND on a miss.
   fastify.get('/payment/:id', { schema: mutableSchema(paymentRouteSchemas.getPayment) }, async (request, reply) => {
     const { id } = request.params;
-    const payment = paymentService.getPayment(id);
+    const payment = await paymentService.getPayment(id);
 
     if (!payment) {
       const { http, body } = buildHttpError('PAYMENT_NOT_FOUND');
       return reply.code(http).send(body);
     }
 
-    const tz = resolveDisplayTz(payment);
+    const tz = await resolveDisplayTz(payment);
     const responseBody = {
       id: payment.id,
       amount: payment.amount,
@@ -317,21 +319,23 @@ export default async function paymentsRoutes(fastify, opts = {}) {
   // An empty result is HTTP 200 with [].
   fastify.get('/payments', { schema: mutableSchema(paymentRouteSchemas.listPayments) }, async (request, reply) => {
     const { limit, offset } = request.query ?? {};
-    const payments = paymentService.listActive({ limit, offset });
+    const payments = await paymentService.listActive({ limit, offset });
 
-    const list = payments.map((payment) => {
-      const tz = resolveDisplayTz(payment);
-      return {
-        id: payment.id,
-        amount: payment.amount,
-        status: payment.status,
-        expires_at: payment.expires_at,
-        created_at: payment.created_at,
-        expires_at_iso: toZonedIso(payment.expires_at, tz),
-        created_at_iso: toZonedIso(payment.created_at, tz),
-        tz,
-      };
-    });
+    const list = await Promise.all(
+      payments.map(async (payment) => {
+        const tz = await resolveDisplayTz(payment);
+        return {
+          id: payment.id,
+          amount: payment.amount,
+          status: payment.status,
+          expires_at: payment.expires_at,
+          created_at: payment.created_at,
+          expires_at_iso: toZonedIso(payment.expires_at, tz),
+          created_at_iso: toZonedIso(payment.created_at, tz),
+          tz,
+        };
+      }),
+    );
 
     return reply.code(200).send(list);
   });
@@ -341,7 +345,7 @@ export default async function paymentsRoutes(fastify, opts = {}) {
   // upload). PAYMENT_NOT_FOUND on a miss.
   fastify.get('/payment/:id/qris.png', { schema: { params: { ...getPaymentParamsSchema } } }, async (request, reply) => {
     const { id } = request.params;
-    const payment = paymentService.getPayment(id);
+    const payment = await paymentService.getPayment(id);
 
     if (!payment) {
       const { http, body } = buildHttpError('PAYMENT_NOT_FOUND');

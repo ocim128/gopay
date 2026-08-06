@@ -118,45 +118,6 @@ function isNonBlankString(value) {
 }
 
 /**
- * Compute the next failed-login counter state for a fixed 15-minute window.
- *
- * The first failure opens a window ending at `now + LOGIN_FAILURE_WINDOW_MS`.
- * Failures that arrive while that window is still open increment the count
- * without extending the window. Once the count reaches the threshold the state
- * escalates to a hard block ending at `now + LOGIN_LOCKOUT_MS`. A failure that
- * arrives after the previous window/block has elapsed starts a fresh window.
- *
- * @param {{ failedAttempts: number, lockoutUntil: number|null }|null} state
- * @param {number} now - epoch ms.
- * @returns {{ failedAttempts: number, lockoutUntil: number }}
- */
-function computeFailureState(state, now) {
-  const prevAttempts = state ? state.failedAttempts : 0;
-  const prevUntil = state ? state.lockoutUntil : null;
-
-  const withinOpenWindow =
-    prevUntil !== null &&
-    now < prevUntil &&
-    prevAttempts > 0 &&
-    prevAttempts < MAX_FAILED_LOGIN_ATTEMPTS;
-
-  let failedAttempts;
-  let windowEnd;
-  if (withinOpenWindow) {
-    failedAttempts = prevAttempts + 1;
-    windowEnd = prevUntil; // keep the fixed window from the first failure
-  } else {
-    failedAttempts = 1;
-    windowEnd = now + LOGIN_FAILURE_WINDOW_MS;
-  }
-
-  const lockoutUntil =
-    failedAttempts >= MAX_FAILED_LOGIN_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : windowEnd;
-
-  return { failedAttempts, lockoutUntil };
-}
-
-/**
  * Build a signed session token for `username` valid for `ttlMs` from `issuedAt`.
  *
  * The token is `<payloadBase64Url>.<signatureBase64Url>`, where the payload is
@@ -356,7 +317,7 @@ export function createAdminAuth(storage, deps = {}) {
     const at = now();
 
     // Refuse before verifying when the IP is already blocked.
-    if (storage.loginAttempts.isLockedOut(ipAddress, at)) {
+    if (await storage.loginAttempts.isLockedOut(ipAddress, at)) {
       return {
         ok: false,
         code: ADMIN_AUTH_ERRORS.ACCOUNT_LOCKED,
@@ -364,7 +325,7 @@ export function createAdminAuth(storage, deps = {}) {
       };
     }
 
-    const user = storage.adminUsers.getByUsername(username);
+    const user = await storage.adminUsers.getByUsername(username);
 
     // Verify the password. When the user is unknown there is no stored hash;
     // verifyPassword returns false for a null/invalid hash, so both the
@@ -376,11 +337,16 @@ export function createAdminAuth(storage, deps = {}) {
     if (!passwordOk) {
       // Track the failure for the IP Address. We track failures for the IP regardless
       // of whether the username is valid or not, preventing an attacker from
-      // probing unknown usernames without penalty.
-      const state = storage.loginAttempts.getByIp(ipAddress);
-      const next = computeFailureState(state, at);
-      storage.loginAttempts.recordFailure(ipAddress, next);
-      
+      // probing unknown usernames without penalty. The fixed-window policy is
+      // applied atomically inside the DAL so concurrent login attempts cannot
+      // race past the threshold.
+      await storage.loginAttempts.recordFailure(ipAddress, {
+        now: at,
+        windowMs: LOGIN_FAILURE_WINDOW_MS,
+        threshold: MAX_FAILED_LOGIN_ATTEMPTS,
+        lockoutMs: LOGIN_LOCKOUT_MS,
+      });
+
       return {
         ok: false,
         code: ADMIN_AUTH_ERRORS.INVALID_CREDENTIALS,
@@ -389,7 +355,7 @@ export function createAdminAuth(storage, deps = {}) {
     }
 
     // Success: clear the failure counters for the IP and mint a 24h session.
-    storage.loginAttempts.resetFailures(ipAddress);
+    await storage.loginAttempts.resetFailures(ipAddress);
     const { token, session } = createSessionToken(username, at, sessionTtlMs, secret);
     return {
       ok: true,

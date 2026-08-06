@@ -35,20 +35,20 @@ function pendingFor(id, amount) {
 }
 
 describe('Property 8: atomic insertion — exactly one wins', () => {
-  it('allows exactly one of N identical-amount insertions and stores no partial row for the rest', () => {
-    fc.assert(
-      fc.property(
+  it('allows exactly one of N identical-amount insertions and stores no partial row for the rest', async () => {
+    await fc.assert(
+      fc.asyncProperty(
         // N insertions (2..20) competing for one identical amount.
         fc.integer({ min: 2, max: 20 }),
         fc.integer({ min: 1000, max: 9999000 }),
-        (n, amount) => {
+        async (n, amount) => {
           // Fresh in-memory storage per run for full isolation.
           const storage = createSqliteStorage({ dbPath: IN_MEMORY_PATH });
           try {
             const ids = Array.from({ length: n }, (_, i) => `p-${i}`);
 
-            const results = ids.map((id) =>
-              storage.payments.insertPending(pendingFor(id, amount)),
+            const results = await Promise.all(
+              ids.map((id) => storage.payments.insertPending(pendingFor(id, amount))),
             );
 
             const winners = ids.filter((_, i) => results[i].ok === true);
@@ -67,26 +67,26 @@ describe('Property 8: atomic insertion — exactly one wins', () => {
             // No partial row is stored for any failed insertion:
             // getById of every loser id returns null.
             for (const id of losers) {
-              expect(storage.payments.getById(id)).toBeNull();
+              expect(await storage.payments.getById(id)).toBeNull();
             }
 
             // The single winner is persisted as a pending row with that amount.
-            const winner = storage.payments.getById(winners[0]);
+            const winner = await storage.payments.getById(winners[0]);
             expect(winner).not.toBeNull();
             expect(winner.status).toBe('pending');
             expect(winner.amount).toBe(amount);
 
             // Exactly one pending row exists for that amount overall.
-            const pendingWithAmount = storage.payments
-              .listActive({ limit: 100 })
-              .filter((p) => p.amount === amount);
+            const pendingWithAmount = (await storage.payments.listActive({ limit: 100 })).filter(
+              (p) => p.amount === amount,
+            );
             expect(pendingWithAmount.length).toBe(1);
             expect(pendingWithAmount[0].id).toBe(winners[0]);
 
             // And the active count reflects only the single survivor.
-            expect(storage.payments.countActive()).toBe(1);
+            expect(await storage.payments.countActive()).toBe(1);
           } finally {
-            storage.close();
+            await storage.close();
           }
         },
       ),
