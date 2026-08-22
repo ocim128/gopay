@@ -152,7 +152,7 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
       txId: 'tx-e2e-0001',
       amount: PAID_AMOUNT,
       type: 'payin',
-      time: '2024-01-01T00:00:00.000Z',
+      time: new Date().toISOString(),
       raw: { reference_id: 'tx-e2e-0001' },
     };
     const gobizClient = makeStubGoBizClient([stubTx]);

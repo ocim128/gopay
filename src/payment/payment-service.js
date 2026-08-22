@@ -62,6 +62,30 @@ export const DEFAULT_TIMEOUT_MS = 300000;
 export const DEFAULT_TOLERANCE = 0;
 
 /**
+ * Allow a small clock difference between GoBiz and this service, but never
+ * settle a payment with a transaction recorded materially before payment
+ * creation. Without this lower bound, a service restart can forget which
+ * historical transactions it has already seen and reuse one for a new QRIS
+ * payment with the same amount.
+ *
+ * @type {number}
+ */
+export const TRANSACTION_TIME_SKEW_MS = 2 * 60 * 1000;
+
+/**
+ * Parse the canonical transaction timestamp used for settlement matching.
+ * Unknown timestamps are unsafe for automatic settlement.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+function parseTransactionTime(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
  * The two amount modes accepted by `createPayment`.
  *
  *   * `CLIENT` (Client_Managed_Mode / Type 1): the API_Client supplies the full
@@ -503,6 +527,13 @@ export function createPaymentService(deps = {}) {
         continue;
       }
 
+      const transactionAt = parseTransactionTime(tx.time);
+      if (transactionAt === null) {
+        // A transaction without a trustworthy timestamp could be historical;
+        // leave it pending for a later, timestamped poll result.
+        continue;
+      }
+
       // Candidates within tolerance, earliest-created first. The indexed path
       // widens the range by `tolerancePad` (the widest tolerance among active
       // payments) to cover any payment's tolerance window; each candidate is
@@ -515,7 +546,8 @@ export function createPaymentService(deps = {}) {
           .filter(
             (p) =>
               !consumed.has(p.id) &&
-              Math.abs(tx.amount - p.amount) <= p.tolerance,
+              Math.abs(tx.amount - p.amount) <= p.tolerance &&
+              transactionAt >= p.created_at - TRANSACTION_TIME_SKEW_MS,
           )
           .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       } else {
@@ -523,7 +555,12 @@ export function createPaymentService(deps = {}) {
         const hi = tx.amount + tolerancePad;
         candidates = (
           await storage.payments.findCandidatesByAmount(lo, hi)
-        ).filter((p) => !consumed.has(p.id) && Math.abs(tx.amount - p.amount) <= p.tolerance);
+        ).filter(
+          (p) =>
+            !consumed.has(p.id) &&
+            Math.abs(tx.amount - p.amount) <= p.tolerance &&
+            transactionAt >= p.created_at - TRANSACTION_TIME_SKEW_MS,
+        );
         // The DAL already returns rows ordered by (created_at ASC, id ASC), so
         // the tie-break is stable without an additional sort.
       }

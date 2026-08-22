@@ -342,6 +342,31 @@ describe('createPaymentService', () => {
       expect(settledEvents).toEqual([{ paymentId: payment.id, txId: 'tx-1' }]);
     });
 
+    it('does not settle a historical transaction reused after a service restart', async () => {
+      const service = makeService();
+      clock = Date.parse('2026-08-22T11:52:37.714Z');
+      const payment = await service.createPayment({ mode: 'client', amount: 410000 });
+
+      const settled = await service.handleTransactions([
+        payinTx('historical-tx', 410000, { time: '2026-08-22T03:55:19.000Z' }),
+      ]);
+
+      expect(settled).toEqual([]);
+      expect((await storage.payments.getById(payment.id)).status).toBe('pending');
+    });
+
+    it('does not settle a transaction without a trustworthy timestamp', async () => {
+      const service = makeService();
+      const payment = await service.createPayment({ mode: 'client', amount: 410001 });
+
+      const settled = await service.handleTransactions([
+        payinTx('unknown-time-tx', 410001, { time: null }),
+      ]);
+
+      expect(settled).toEqual([]);
+      expect((await storage.payments.getById(payment.id)).status).toBe('pending');
+    });
+
     it('matches within tolerance and ignores transactions outside it', async () => {
       const service = makeService();
       const payment = await service.createPayment({ mode: 'client', amount: 10000, tolerance: 50 });
