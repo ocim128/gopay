@@ -11,11 +11,13 @@
 //
 //   STORAGE_BACKEND=sqlite | mongodb   (default: sqlite)
 //   MONGODB_URI=mongodb+srv://...       (required for mongodb)
+//   MONGODB_DB_NAME=gopay               (required when the URI has no path)
 //
 // Rules enforced here:
 //   - `STORAGE_BACKEND` accepts `sqlite` or `mongodb` and defaults to `sqlite`.
 //   - `MONGODB_URI` is required for `mongodb`.
-//   - The MongoDB URI must include an explicit database name.
+//   - MongoDB must receive an explicit database name, from the URI or
+//     MONGODB_DB_NAME.
 //   - MongoDB selection must NEVER fall back to SQLite after an error: a
 //     startup failure is fatal and surfaces to the caller.
 
@@ -49,7 +51,7 @@ export const DEFAULT_DB_PATH = 'data/panel.db';
  * @property {string} [mongoUri]          MongoDB connection URI (required when
  *   the backend is `mongodb`). Defaults to `MONGODB_URI`.
  * @property {string} [mongoDbName]       MongoDB database name. Optional: when
- *   omitted the database encoded in the URI is used.
+ *   omitted MONGODB_DB_NAME or the database encoded in the URI is used.
  */
 
 /**
@@ -79,27 +81,32 @@ function resolveBackend(override) {
 }
 
 /**
- * Confirm a MongoDB URI string includes an explicit database name. The Node
- * driver requires one (it cannot target a default database on its own), and the
+ * Resolve the MongoDB database name. An explicit option or MONGODB_DB_NAME may
+ * supply the name when a shared-cluster URI intentionally has no path. The
  * plan mandates Gopay use its own database — so a missing name is a hard error.
  *
  * Returns the database name parsed out of the URI when one is present.
  *
  * @param {string} uri
- * @returns {{ dbName: string }}
- * @throws {Error} when the URI has no database path.
+ * @param {string|undefined} configuredName
+ * @returns {string}
+ * @throws {Error} when no database name is configured.
  */
-function requireMongoDatabaseName(uri) {
+export function resolveMongoDatabaseName(uri, configuredName) {
   // Parse the pathname out without a try (an invalid URI here is a
   // configuration error; letting it throw is the correct signal).
   const match = uri.match(/^mongodb(?:\+srv)?:\/\/[^/]+\/([^?]*)(?:\?.*)?$/);
-  const dbName = match ? decodeURIComponent(match[1]) : '';
+  const uriDbName = match ? decodeURIComponent(match[1]) : '';
+  const dbName = (configuredName ?? uriDbName).trim();
   if (!dbName) {
     throw new Error(
-      'MONGODB_URI must include an explicit database name (e.g. mongodb+srv://host/gopay).',
+      'Set MONGODB_DB_NAME or include an explicit database name in MONGODB_URI (e.g. mongodb+srv://host/gopay).',
     );
   }
-  return { dbName };
+  if (/[\\/?.#]/.test(dbName)) {
+    throw new Error('MONGODB_DB_NAME contains invalid characters.');
+  }
+  return dbName;
 }
 
 /**
@@ -133,10 +140,13 @@ export async function createDal(options = {}) {
         "STORAGE_BACKEND is 'mongodb' but MONGODB_URI is not set. Set MONGODB_URI to a MongoDB connection string.",
       );
     }
-    requireMongoDatabaseName(uri);
+    const dbName = resolveMongoDatabaseName(
+      uri,
+      options.mongoDbName ?? process.env.MONGODB_DB_NAME,
+    );
     storage = await createMongoStorage({
       uri,
-      dbName: options.mongoDbName,
+      dbName,
     });
   } else {
     const dbPath = options.dbPath ?? process.env.DB_PATH ?? DEFAULT_DB_PATH;

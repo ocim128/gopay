@@ -182,7 +182,8 @@ from **API Keys** and put it in `panel/.env` as `PANEL_API_KEY`.
 | `DB_PATH` | optional | SQLite database path (default under `data/`). Used only when `STORAGE_BACKEND=sqlite` (the default). |
 | `TOKEN_FILE_PATH` | optional | Encrypted GoBiz token path (default `.gopay_token.enc`). |
 | `STORAGE_BACKEND` | optional | Storage backend: `sqlite` (default) or `mongodb`. See [Storage backend](#storage-backend). |
-| `MONGODB_URI` | mongodb only | MongoDB connection string with a dedicated database name. Required when `STORAGE_BACKEND=mongodb`; ignored otherwise. Never logged. |
+| `MONGODB_URI` | mongodb only | MongoDB connection string. Required when `STORAGE_BACKEND=mongodb`; ignored otherwise. Never logged. |
+| `MONGODB_DB_NAME` | mongodb only | Dedicated database name. Required when the URI has no database path; defaults to the URI path when omitted. Never logged. |
 | `NODE_ENV` | optional | When `production`, marks the admin session cookie `Secure` (HTTPS only). Leave unset to allow plain `http://IP:port`. |
 | `TZ` | optional | Process timezone for local-time formatting (PM2 pins `Asia/Jakarta`). Stored timestamps stay UTC epoch ms. |
 
@@ -206,15 +207,16 @@ DB_PATH=data/panel.db
 # MongoDB
 STORAGE_BACKEND=mongodb
 MONGODB_URI=mongodb+srv://gopay-user:strong-password@cluster.example/gopay
+MONGODB_DB_NAME=gopay
 ```
 
 Rules:
 
 - `STORAGE_BACKEND` accepts `sqlite` or `mongodb` and defaults to `sqlite`.
-- `MONGODB_URI` is required for `mongodb` and **must include an explicit
-  database name** (the trailing `/gopay` above). Gopay must use its own
-  database and a least-privilege database user; it may share an Atlas cluster
-  with another app, but not its database or user.
+- `MONGODB_URI` is required for `mongodb`. If the URI has no database path,
+  `MONGODB_DB_NAME` must provide one. Gopay must use its own database and a
+  least-privilege database user; it may share an Atlas cluster with another
+  app, but not its database or user.
 - MongoDB selection **never falls back to SQLite** after an error: if Atlas is
   unreachable at startup the process fails fast rather than silently switching
   backends. Readiness is reported through `/health/ready`.

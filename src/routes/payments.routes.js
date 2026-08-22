@@ -38,6 +38,18 @@ import { generateQrisImage as defaultGenerateQrisImage } from '../payment/qris-b
 import { paymentRouteSchemas, getPaymentParamsSchema, WEBHOOK_URL_MAX_LENGTH } from './schemas.js';
 import { isValidTimezone, toZonedIso, DISPLAY_TIMEZONE } from '../time.js';
 
+function parseProviderTransaction(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Map the public amount-mode values accepted on the wire
  * (`client_managed` / `server_managed`) to the Payment_Service's internal mode
@@ -309,6 +321,16 @@ export default async function paymentsRoutes(fastify, opts = {}) {
       responseBody.paid_amount = payment.paid_amount;
       responseBody.paid_at = payment.paid_at;
       responseBody.paid_at_iso = toZonedIso(payment.paid_at, tz);
+      const providerTransaction = parseProviderTransaction(payment.tx_raw);
+      if (
+        providerTransaction !== null &&
+        (typeof providerTransaction.transaction_time === 'string' ||
+          typeof providerTransaction.transaction_time === 'number')
+      ) {
+        responseBody.provider_transaction = {
+          transaction_time: providerTransaction.transaction_time,
+        };
+      }
     }
 
     return reply.code(200).send(responseBody);

@@ -81,6 +81,8 @@ services:
       # string with a dedicated database name and least-privilege user.
       - key: MONGODB_URI
         sync: false
+      - key: MONGODB_DB_NAME
+        value: gopay
 
 # SQLite production deployment: attach a persistent disk and put DB_PATH /
 # TOKEN_FILE_PATH under the disk mount. Uncomment and adjust for a paid service.

@@ -9,11 +9,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { createDal } from '../dal/index.js';
+import { createDal, resolveMongoDatabaseName } from '../dal/index.js';
 
 // Save and restore the env vars the factory reads so each test is hermetic.
 const SAVED_BACKEND = process.env.STORAGE_BACKEND;
 const SAVED_URI = process.env.MONGODB_URI;
+const SAVED_DB_NAME = process.env.MONGODB_DB_NAME;
 
 describe('createDal backend selection', () => {
   /** Restore env vars after every test so they never leak across cases. */
@@ -27,6 +28,11 @@ describe('createDal backend selection', () => {
       delete process.env.MONGODB_URI;
     } else {
       process.env.MONGODB_URI = SAVED_URI;
+    }
+    if (SAVED_DB_NAME === undefined) {
+      delete process.env.MONGODB_DB_NAME;
+    } else {
+      process.env.MONGODB_DB_NAME = SAVED_DB_NAME;
     }
   }
 
@@ -74,6 +80,18 @@ describe('createDal backend selection', () => {
     process.env.MONGODB_URI = 'mongodb+srv://user:pass@cluster.example/';
     await expect(createDal()).rejects.toThrow(/explicit database name/);
     restoreEnv();
+  });
+
+  it('accepts a separate database name for a shared-cluster URI', () => {
+    expect(
+      resolveMongoDatabaseName('mongodb+srv://user:pass@cluster.example/?retryWrites=true', 'gopay'),
+    ).toBe('gopay');
+  });
+
+  it('rejects an invalid configured database name', () => {
+    expect(() => resolveMongoDatabaseName('mongodb+srv://host/', 'auto/beli')).toThrow(
+      /invalid characters/,
+    );
   });
 
   it('does NOT fall back to SQLite when MongoDB startup fails', async () => {

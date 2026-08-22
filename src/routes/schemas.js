@@ -244,6 +244,7 @@ export const getPaymentResponseSchema = Object.freeze({
     paid_amount: { type: 'integer' },
     paid_at: { type: 'integer' },
     paid_at_iso: { type: 'string' },
+    provider_transaction: { type: 'object', additionalProperties: true },
     // The IANA timezone actually applied to the _iso fields.
     tz: { type: 'string' },
   },

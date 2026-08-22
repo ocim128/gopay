@@ -56,6 +56,7 @@ function createInMemoryStorage() {
           tx_id: null,
           paid_amount: null,
           paid_at: null,
+          tx_raw: null,
         };
         byId.set(payment.id, payment);
         return { ok: true, value: { ...payment } };
@@ -82,6 +83,7 @@ function createInMemoryStorage() {
         p.tx_id = settlement.txId;
         p.paid_amount = settlement.paidAmount;
         p.paid_at = settlement.paidAt;
+        p.tx_raw = settlement.raw ?? null;
         return { ok: true, value: { ...p } };
       },
       expireOverdue(now) {
@@ -320,7 +322,17 @@ describe('GET /payment/:id', () => {
     const created = (
       await app.inject({ method: 'POST', url: '/payment', payload: { mode: 'client_managed', amount: 6543 } })
     ).json();
-    storage.payments.markPaid(created.id, { txId: 'tx-1', paidAmount: 6543, paidAt: 1700000000000 });
+    const rawTransaction = {
+      transaction_id: 'tx-1',
+      transaction_time: '2026-08-22T13:08:42.000Z',
+      gross_amount: 654300,
+    };
+    storage.payments.markPaid(created.id, {
+      txId: 'tx-1',
+      paidAmount: 6543,
+      paidAt: 1700000000000,
+      raw: JSON.stringify(rawTransaction),
+    });
 
     const res = await app.inject({ method: 'GET', url: `/payment/${created.id}` });
     expect(res.statusCode).toBe(200);
@@ -331,6 +343,9 @@ describe('GET /payment/:id', () => {
     expect(body.paid_at).toBe(1700000000000);
     expect(body.paid_at_iso).toMatch(/\+07:00$/);
     expect(new Date(body.paid_at_iso).getTime()).toBe(1700000000000);
+    expect(body.provider_transaction).toEqual({
+      transaction_time: rawTransaction.transaction_time,
+    });
   });
 });
 
