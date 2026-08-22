@@ -8,7 +8,7 @@
 #
 # Storage backends:
 #
-#   SQLite (default) — set STORAGE_BACKEND=sqlite (or omit it) on a PAID service
+#   SQLite — set STORAGE_BACKEND=sqlite on a PAID service
 #     with a persistent disk, and put DB_PATH and TOKEN_FILE_PATH on that disk.
 #     SQLite cannot scale horizontally. The blueprint below shows the disk
 #     configuration commented out; enable it for a real SQLite deployment.
@@ -47,9 +47,10 @@ services:
       - key: TZ
         value: Asia/Jakarta
 
-      # Storage backend selection. Either `sqlite` (default) or `mongodb`.
+      # Production backend. MongoDB keeps payment state and API keys outside
+      # Render's ephemeral filesystem.
       - key: STORAGE_BACKEND
-        value: sqlite
+        value: mongodb
 
       # Configure these as secrets in Render. They are intentionally not
       # included as literal values in this repository.

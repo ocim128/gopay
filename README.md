@@ -268,11 +268,12 @@ runs a bounded `storage.ping()` and reports 503 when the selected backend is
 unreachable. (`/health/live` is also available for liveness probes and always
 returns 200 while the process is up.)
 
-The Blueprint is configured for the Free plan so it can be used for an initial
-deployment test. Render Free services are not suitable for real payments:
-they sleep after inactivity and their local filesystem is ephemeral. This
-service stores payment state in SQLite and the GoBiz access token on disk, so
-data can be lost after a restart, redeploy, or sleep.
+The Blueprint keeps the Free plan for initial deployment testing, but selects
+MongoDB for payment state and API-key persistence. Render Free services still
+sleep after inactivity and their local filesystem is ephemeral, so the GoBiz
+access token file must be regenerated successfully from `GOPAY_EMAIL` and
+`GOPAY_PASSWORD` after a restart, or `TOKEN_FILE_PATH` must be placed on
+persistent storage.
 
 **Choose a backend** (see [Storage backend](#storage-backend)):
 
