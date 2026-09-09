@@ -99,6 +99,13 @@ export class GoBizClient {
    */
   async init() {
     if (this._initialized) return;
+    if (!this._initializing) {
+      this._initializing = this._init().finally(() => { this._initializing = null; });
+    }
+    return this._initializing;
+  }
+
+  async _init() {
 
     // Make sure a usable token exists (loaded from the store, validated, or a
     // fresh login). The auth manager owns this decision.
@@ -218,6 +225,7 @@ export class GoBizClient {
       '[GoBizClient] Analytics returned no transactions array; falling back to the journal.',
     );
     const journalRaw = await this._fetchJournal({ days, size, start, end, offset });
+    if (!Array.isArray(journalRaw?.data)) throw new Error('Invalid GoBiz journal response');
     return this.adapter.parseJournalTx(journalRaw);
   }
 

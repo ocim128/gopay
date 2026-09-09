@@ -118,7 +118,7 @@ X-API-Key: <API_KEY>                 # alternative`;
   }
 ]`;
 
-  const imgTag = $derived(`<img src="${baseUrl}/payment/4ad4f8df-.../qris.png" alt="QRIS" />`);
+  const imgTag = `<img src="/your-store/order/ORDER_ID/qris" alt="QRIS" />`;
 
   const webhookJson = `{
   "payment_id": "4ad4f8df-a549-482d-8b73-2e25d74f2b28",
@@ -327,7 +327,7 @@ def verify(raw_body: bytes, signature_hex: str) -> bool:
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">1</span><span><span class="badge-method-post">POST</span> <code class="badge-route">/payment</code> with the amount (and optionally a <code class="badge-param">webhook_url</code>).</span></li>
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">2</span><span>Show the customer <code class="badge-param">qris_string</code> (render a QR) or <code class="badge-param">qris_url</code> (PNG).</span></li>
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">3</span><span>Wait for the webhook (<code class="badge-param">payment_status</code>: <code class="badge-value">"paid"</code>) — verify the signature, then fulfill. Optionally reconcile via <span class="badge-method-get">GET</span> <code class="badge-route">/payment/:id</code>.</span></li>
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">4</span><span>Unpaid payments auto-expire after <code class="badge-param">timeout</code> (<code class="badge-param">payment_status</code>: <code class="badge-value">"expired"</code>).</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">4</span><span>Hide the QR after <code class="badge-param">timeout</code> and keep checking until <code class="badge-param">reconcile_until</code>, 120 seconds later (<code class="badge-param">payment_status</code>: <code class="badge-value">"expired"</code>).</span></li>
         </ol>
         <p class="rounded-xl bg-slate-50 p-3 text-xs text-slate-500">
           Amount uniqueness is enforced only among pending payments. Ranges: amount 1000..9999000; timeout 10000..86400000 ms; tolerance 0..999.
@@ -435,6 +435,7 @@ def verify(raw_body: bytes, signature_hex: str) -> bool:
 
         <h2 class="text-lg font-bold text-slate-900">7. QRIS Image — <span class="badge-method-get">GET</span> <code class="badge-route">/payment/:id/qris.png</code></h2>
         <p class="text-sm text-slate-600">Returns the QRIS rendered as a PNG (<code class="badge-value">image/png</code>).</p>
+        <p class="text-sm text-slate-600">Fetch the gateway image from your storefront backend with its bearer API key after checking order ownership. Display that proxy URL below. Keep the API key on the server, or render the returned qris_string directly.</p>
         <pre class="code">{imgTag}</pre>
       </article>
 

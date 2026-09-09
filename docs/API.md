@@ -214,9 +214,7 @@ curl -s "http://YOUR_HOST:3000/payments?limit=50&offset=0" \
 Returns the payment's QRIS rendered as a PNG (`Content-Type: image/png`).
 Served internally — no external upload.
 
-```html
-<img src="http://YOUR_HOST:3000/payment/4ad4f8df-.../qris.png" alt="QRIS" />
-```
+This endpoint requires the server-side API key. Fetch it through a storefront backend route that checks ownership of the order and forwards `Authorization: Bearer <API_KEY>`, then display that route in the image element. Never put the API key in customer HTML or a URL. Alternatively, render `qris_string` with a QR library. AutoBeli already uses an authenticated image proxy.
 
 **Errors:** `PAYMENT_NOT_FOUND`, `UNAUTHORIZED`.
 
@@ -229,7 +227,7 @@ POSTs a signed notification to a webhook URL.
 
 ### 4.1 When and where
 
-- **Trigger:** the payment transitions to `paid` (matched by amount within `tolerance`) **or** to `expired` (its lifetime elapsed before payment). The two are mutually exclusive, so a payment fires **at most one** terminal webhook.
+- **Trigger:** the payment transitions to `paid` (matched by amount within `tolerance`) **or** to `expired` (its lifetime elapsed before payment). The two are mutually exclusive, so a payment has one terminal event, which may be delivered more than once during retries.
 - **Target URL selection:** the payment's own `webhook_url` → otherwise the Config default `webhook_url` → if neither exists, **nothing is sent** (and it is not treated as a failure).
 
 ### 4.2 Request
@@ -397,10 +395,10 @@ def verify(raw_body: bytes, signature_hex: str) -> bool:
 ## 5. Typical integration flow
 
 1. `POST /payment` with the amount (and optionally a `webhook_url`).
-2. Show the customer `qris_string` (render a QR) or `qris_url` (PNG).
+2. Show the customer `qris_string` (render a QR) or proxy `qris_url` through your authenticated storefront backend (PNG).
 3. Wait for the **webhook** (`status: "paid"`) — verify the signature, then fulfill.
    - As a fallback / reconciliation, you may also poll `GET /payment/:id`.
-4. The payment auto-expires after `timeout` if unpaid (`status: "expired"`).
+4. Hide the QR after `timeout`; keep polling through `reconcile_until`. If no qualifying transfer is found, the payment expires after reconciliation (`status: "expired"`).
 
 ---
 
@@ -414,3 +412,11 @@ def verify(raw_body: bytes, signature_hex: str) -> bool:
 - `timeout`: **10000..86400000** ms. `tolerance`: **0..999** Rupiah.
 - Set the merchant **Static QRIS** and the default `webhook_url` in the panel **Config** page before going live.
 - Set the default **display timezone** (`display_timezone`) in the panel **Config** page if your clients are not in WIB; per-payment `tz` overrides it. This only affects the `*_at_iso` display fields — stored timestamps stay absolute epoch milliseconds.
+
+## Reliability and retry contract
+
+- Send a stable `Idempotency-Key` header on `POST /payment` for each checkout attempt (1-200 printable ASCII characters without spaces). It is scoped to the authenticated API key. Concurrent requests and retries return the original payment when the creation parameters match. Changed parameters return `409 IDEMPOTENCY_CONFLICT`; recover the original attempt instead of allocating another payment. Keys remain effective while their payment records are retained.
+- Creation and status responses include `reconcile_until` (epoch milliseconds). Stop displaying the QR at `expires_at`. The payment can remain `pending` until `reconcile_until`, currently 120 seconds later, to collect delayed reports of transfers made within the QR lifetime. Poll during this interval; do not allocate a replacement QR yet. Transfers timestamped before creation or after expiry cannot settle that payment.
+- Only successful QRIS settlement/capture transactions can pay an order; refunds and other payment methods are ignored. Outages longer than the reconciliation interval and payments sent after QR expiry require manual investigation.
+- Terminal-state webhook obligations are persisted atomically with the payment. A background worker recovers outstanding jobs after restarts, retries up to five delivery attempts with backoff, and reuses the original signed request. Delivery is at least once: receivers must deduplicate by payment ID and event. Historical terminal records created before this change are not automatically replayed.
+- `503 PROVIDER_UNAVAILABLE` means the merchant QR is not ready. Retry the same checkout attempt after recovery. `409 AMOUNT_IN_USE` means a live reservation owns that amount; server-managed creation allocates a unique amount and the checkout must show the returned total.

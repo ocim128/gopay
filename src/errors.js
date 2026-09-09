@@ -14,6 +14,11 @@
  * @type {Readonly<Record<string, { http: number, message: string }>>}
  */
 export const ERROR_DEFINITIONS = Object.freeze({
+  PROVIDER_UNAVAILABLE: { http: 503, message: 'Payment provider is starting or unavailable. Please retry shortly.' },
+  IDEMPOTENCY_CONFLICT: {
+    http: 409,
+    message: 'This idempotency key was already used with a different payment request.',
+  },
   // Generic request body validation failure (missing/invalid amount field,
   // timeout/tolerance out of range, malformed body).
   INVALID_REQUEST: {

@@ -109,7 +109,12 @@ export class AuthTokenManager {
    * @returns {Promise<string>} the freshly issued access token.
    * @throws {Error} when credentials are missing or the token exchange fails.
    */
-  async login() {
+  login() {
+    if (!this._loginPromise) this._loginPromise = this._login().finally(() => { this._loginPromise = null; });
+    return this._loginPromise;
+  }
+
+  async _login() {
     const { email, password } = this.credentials ?? {};
     if (!email || !password) {
       throw new Error(

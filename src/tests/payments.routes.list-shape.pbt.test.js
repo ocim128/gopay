@@ -208,7 +208,7 @@ describe('Property 12: Active_Payment list contains only pending & is well-forme
           // Advance time past the minimum-timeout payments (expiring) but well
           // short of the maximum-timeout payments (keep). The GET /payments
           // handler lazily expires the overdue ones before listing.
-          clock.t += TIMEOUT_MIN_MS + 1;
+          clock.t += TIMEOUT_MIN_MS + 120000 + 1;
 
           const res = await app.inject({ method: 'GET', url: '/payments' });
           expect(res.statusCode).toBe(200);

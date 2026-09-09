@@ -82,7 +82,7 @@ describe('Property 14: Matching within tolerance, otherwise ignored', () => {
           // Settle within the payment's lifetime.
           clock = createdAt + settleOffset;
           const settled = await service.handleTransactions([
-            { txId: 'tx-match', amount: txAmount, type: 'payin', time: '2024-01-01T00:00:00.000Z', raw: {} },
+            { txId: 'tx-match', amount: txAmount, type: 'payin', time: new Date(clock).toISOString(), raw: {} },
           ]);
 
           const read = await service.getPayment(payment.id);

@@ -112,8 +112,10 @@ export class HttpTransport {
     }
 
     let response;
+    let rawText;
     try {
       response = await this._fetch(url, init);
+      rawText = await response.text();
     } catch (error) {
       if (error && error.name === 'AbortError') {
         throw new Error(
@@ -127,8 +129,6 @@ export class HttpTransport {
 
     // Buffer the body exactly once so json()/text() are safe to call repeatedly
     // and in any order. A raw fetch Response body can only be consumed once.
-    const rawText = await response.text();
-
     return {
       status: response.status,
       ok: response.ok,

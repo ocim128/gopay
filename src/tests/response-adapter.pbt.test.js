@@ -79,7 +79,7 @@ function assertCanonical(result, sourceTx, expectedRaw) {
     ['amount', 'raw', 'time', 'txId', 'type'].sort(),
   );
   // type is always 'payin'.
-  expect(result.type).toBe('payin');
+  expect(result.type).toBe('ignored');
   // amount in Rupiah.
   expect(result.amount).toBe(expectedAmount(sourceTx.gross_amount));
   // txId precedence.

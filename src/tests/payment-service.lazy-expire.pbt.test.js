@@ -75,7 +75,7 @@ describe('Property 10: Lazy-expire', () => {
           expect((await service.getPayment(created.id)).status).toBe('pending');
 
           // Reading after now passes expires_at (delta > 0): expired.
-          clock = created.expires_at + delta;
+          clock = created.expires_at + 120000 + delta;
           const afterExpiry = await service.getPayment(created.id);
           expect(afterExpiry.status).toBe('expired');
 

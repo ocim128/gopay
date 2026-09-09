@@ -139,6 +139,7 @@ export class SharedPoller {
 
     this.gobizClient = gobizClient;
     this.getActiveCount = deps.getActiveCount;
+    this.getStartTime = deps.getStartTime ?? null;
     this.onTransactions = deps.onTransactions;
     this.getPollInterval =
       typeof deps.getPollInterval === 'function' ? deps.getPollInterval : null;
@@ -202,6 +203,7 @@ export class SharedPoller {
      * @type {Promise<void>}
      */
     this._scheduling = Promise.resolve();
+    this._cycle = null;
   }
 
   /**
@@ -400,6 +402,7 @@ export class SharedPoller {
     await this._runMaintenanceIfDue();
 
     const activeCount = await this._safeActiveCount();
+    if (activeCount === null) return;
     if (activeCount <= 0) {
       // No Active_Payment: stop polling. `stop()` is async (it drains any
       // in-flight reschedule) so await it; otherwise the drain Promise would
@@ -412,10 +415,31 @@ export class SharedPoller {
 
     let transactions = [];
     try {
-      transactions = await this.gobizClient.getRecentTransactions({
-        days: this.days,
-        size: this._pollWindow,
-      });
+      // Freeze the query bounds across pages. An incomplete batch must not
+      // expire payments that could match a later page on the next tick.
+      const end = new Date(this._now()).toISOString();
+      const oldest = this.getStartTime ? await this.getStartTime() : null;
+      const start = new Date(Number.isFinite(oldest) ? oldest : this._now() - this.days * 86400000).toISOString();
+      let offset = 0;
+      const seen = new Set();
+      for (;;) {
+        const page = await this.gobizClient.getRecentTransactions({
+          days: this.days, size: this._pollWindow, offset, start, end,
+        });
+        if (!Array.isArray(page)) throw new Error('Invalid transaction page');
+        const rawCount = page.pageCount ?? page.length;
+        let newIds = 0;
+        for (const tx of page) {
+          if (!tx?.txId || !seen.has(tx.txId)) {
+            transactions.push(tx);
+            if (tx?.txId) { seen.add(tx.txId); newIds++; }
+          }
+        }
+        offset += rawCount;
+        if (rawCount === 0 && page.total > offset) throw new Error('Incomplete transaction pagination');
+        if (rawCount === 0 || (page.total > 0 ? offset >= page.total : rawCount < this._pollWindow)) break;
+        if (newIds === 0) throw new Error('Transaction pagination made no progress');
+      }
     } catch (err) {
       this.logger?.error?.(
         `[SharedPoller] Failed to fetch transactions: ${err?.message ?? err}`,
@@ -507,10 +531,21 @@ export class SharedPoller {
    */
   async _runCycle() {
     this._timer = null;
-    await this.onTick();
-    if (this._running) {
-      await this._scheduleNext();
+    if (this._cycle) return;
+    this._cycle = this.onTick();
+    try {
+      await this._cycle;
+    } catch (err) {
+      this.logger?.error?.(`[SharedPoller] Poll cycle failed: ${err?.message ?? err}`);
+    } finally {
+      this._cycle = null;
+      if (this._running) await this._scheduleNext();
     }
+  }
+
+  async drain() {
+    await this.stop();
+    await this._cycle;
   }
 
   /**
@@ -540,7 +575,7 @@ export class SharedPoller {
 
   /**
    * Read the Active_Payment count defensively, treating a throw/rejection or a
-   * non-finite value as zero (which stops the loop rather than crashing it).
+   * non-finite value as unknown (which keeps the loop available for recovery).
    *
    * @returns {Promise<number>}
    * @private
@@ -548,12 +583,12 @@ export class SharedPoller {
   async _safeActiveCount() {
     try {
       const count = await this.getActiveCount();
-      return Number.isFinite(count) ? count : 0;
+      return Number.isFinite(count) ? count : null;
     } catch (err) {
       this.logger?.error?.(
         `[SharedPoller] Failed to read the active payment count: ${err?.message ?? err}`,
       );
-      return 0;
+      return null;
     }
   }
 

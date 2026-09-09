@@ -56,6 +56,13 @@
  * MongoDB documents.
  *
  * @typedef {Object} Payment
+ * @property {string|null} [request_hash] Fingerprint for client-scoped creation retries.
+ * @property {string|null} [notification_state] Durable terminal notification state.
+ * @property {number} [notification_attempts] Completed delivery attempts.
+ * @property {number} [notification_next_at] Next delivery time, epoch ms.
+ * @property {string|null} [notification_lease] Current delivery owner's token.
+ * @property {number|null} [notification_lease_until] Lease expiry, epoch ms.
+ * @property {string|null} [notification_request] Persisted signed request JSON.
  * @property {string} id
  * @property {number} amount                 Integer Rupiah, 1..999999999.
  * @property {'pending'|'paid'|'expired'} status
@@ -82,6 +89,7 @@
  * payments at insertion time.
  *
  * @typedef {Object} PendingPaymentInput
+ * @property {string|null} [request_hash]
  * @property {string} id
  * @property {number} amount
  * @property {string} qris_string
@@ -233,6 +241,7 @@
  *   call, so a caller can fire an "expired" side effect (e.g. a webhook)
  *   exactly once per payment. Required: every backend must implement it.
  * @property {() => Awaitable<number>} countActive
+ * @property {() => Awaitable<number|null>} [oldestActiveCreation] Earliest pending creation timestamp.
  *   Count payments currently in `pending` status (drives Adaptive_Polling).
  * @property {(minAmount: number, maxAmount: number) => Awaitable<Payment[]>} findCandidatesByAmount
  *   Find pending payments whose `amount` falls within `[minAmount, maxAmount]`,
@@ -350,6 +359,7 @@
  * document, or client object is exposed through any of these members.
  *
  * @typedef {Object} Storage
+ * @property {{claim: (now: number, leaseUntil: number, token: string) => Awaitable<Payment|null>, saveRequest: (id: string, token: string, request: string) => Awaitable<boolean>, finish: (id: string, token: string, result: {state: string, attempts: number, nextAt: number}) => Awaitable<boolean>}} [notifications] Atomic leased outbox. Terminal status updates enqueue jobs in the same write; finishing and request persistence require lease ownership.
  * @property {PaymentsStore} payments
  * @property {ApiKeysStore} apiKeys
  * @property {WebhookLogsStore} webhookLogs

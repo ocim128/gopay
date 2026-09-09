@@ -210,6 +210,7 @@ export const createPaymentResponseSchema = Object.freeze({
     qris_url: { type: ['string', 'null'] },
     // Epoch milliseconds (UTC) — the absolute instant; kept for back-compat.
     expires_at: { type: 'integer' },
+    reconcile_until: { type: 'integer' },
     created_at: { type: 'integer' },
     // Offset-aware ISO-8601 siblings rendered in the resolved display timezone.
     expires_at_iso: { type: 'string' },
@@ -236,6 +237,7 @@ export const getPaymentResponseSchema = Object.freeze({
     status: { type: 'string', enum: ['pending', 'paid', 'expired'] },
     // Epoch milliseconds (UTC); ISO siblings rendered in Asia/Jakarta (+07:00).
     expires_at: { type: 'integer' },
+    reconcile_until: { type: 'integer' },
     created_at: { type: 'integer' },
     expires_at_iso: { type: 'string' },
     created_at_iso: { type: 'string' },

@@ -171,6 +171,7 @@ describe('End-to-end settlement (create -> poll -> match -> settle -> webhook)',
     });
 
     expect(created.status).toBe('pending');
+    stubTx.time = new Date(created.created_at).toISOString();
     expect(created.tx_id).toBeNull();
     expect(created.paid_amount).toBeNull();
     expect(created.paid_at).toBeNull();

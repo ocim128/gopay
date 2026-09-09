@@ -50,7 +50,7 @@ describe('createPaymentService', () => {
 
   /** Build a canonical payin transaction. */
   function payinTx(txId, amount, extra = {}) {
-    return { txId, amount, type: 'payin', time: '2024-01-01T00:00:00.000Z', raw: {}, ...extra };
+    return { txId, amount, type: 'payin', time: new Date(clock).toISOString(), raw: {}, ...extra };
   }
 
   beforeEach(async () => {
@@ -155,7 +155,7 @@ describe('createPaymentService', () => {
       const service = makeService();
       const first = await service.createPayment({ mode: 'client', amount: 9001, timeout: 10000 });
       // Advance past expiry and lazily expire via a read.
-      clock = first.expires_at + 1;
+      clock = first.expires_at + 120000 + 1;
       expect((await service.getPayment(first.id)).status).toBe('expired');
       // The amount is now free for a new payment.
       const second = await service.createPayment({ mode: 'client', amount: 9001 });
@@ -262,7 +262,7 @@ describe('createPaymentService', () => {
     it('lazily expires a pending payment once now passes expires_at', async () => {
       const service = makeService();
       const created = await service.createPayment({ mode: 'client', amount: 50200, timeout: 10000 });
-      clock = created.expires_at + 1;
+      clock = created.expires_at + 120000 + 1;
       const read = await service.getPayment(created.id);
       expect(read.status).toBe('expired');
       // The transition is persisted, not just computed.
@@ -289,7 +289,7 @@ describe('createPaymentService', () => {
       const shortLived = await service.createPayment({ mode: 'client', amount: 50010, timeout: 10000 });
       const longLived = await service.createPayment({ mode: 'client', amount: 50020, timeout: 60000 });
 
-      clock = shortLived.expires_at + 1;
+      clock = shortLived.expires_at + 120000 + 1;
       const list = await service.listActive();
       expect(list.map((p) => p.id)).toEqual([longLived.id]);
     });
@@ -454,7 +454,7 @@ describe('createPaymentService', () => {
       const payment = await service.createPayment({ mode: 'client', amount: 6000, timeout: 10000 });
 
       // Advance past expiry; handleTransactions should lazily expire then ignore.
-      clock = payment.expires_at + 1;
+      clock = payment.expires_at + 120000 + 1;
       const settled = await service.handleTransactions([payinTx('tx-late', 6000)]);
       expect(settled).toEqual([]);
       expect((await storage.payments.getById(payment.id)).status).toBe('expired');

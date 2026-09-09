@@ -61,7 +61,7 @@ describe('Payment_Service expiry notification', () => {
     expect(expiredEvents).toHaveLength(0);
 
     // Move past expires_at and read it back.
-    clock = payment.expires_at + 1;
+    clock = payment.expires_at + 120000 + 1;
     const read = await service.getPayment(payment.id);
 
     expect(read.status).toBe('expired');
@@ -76,7 +76,7 @@ describe('Payment_Service expiry notification', () => {
 
   it('fires onExpired via listActive when a payment is overdue', async () => {
     const payment = await createPending(26000, 10000);
-    clock = payment.expires_at + 1;
+    clock = payment.expires_at + 120000 + 1;
 
     const active = await service.listActive();
     // The expired payment is no longer active...
@@ -88,7 +88,7 @@ describe('Payment_Service expiry notification', () => {
 
   it('fires onExpired on a poll tick even with an empty transaction batch (handleTransactions)', async () => {
     const payment = await createPending(27000, 10000);
-    clock = payment.expires_at + 1;
+    clock = payment.expires_at + 120000 + 1;
 
     // An empty batch still runs the expiry sweep (this is what the poller passes
     // when GoBiz returns no transactions).
@@ -104,7 +104,7 @@ describe('Payment_Service expiry notification', () => {
     const b = await createPending(1002, 10000);
     const c = await createPending(1003, 60000); // longer timeout — still pending
 
-    clock = a.expires_at + 1; // past a and b (10s) but not c (60s)
+    clock = a.expires_at + 120000 + 1; // past a and b (10s) but not c (60s)
     await service.handleTransactions([]);
 
     const ids = expiredEvents.map((p) => p.id).sort();
@@ -125,7 +125,7 @@ describe('Payment_Service expiry notification', () => {
       paidAt: clock,
     });
 
-    clock = payment.expires_at + 1;
+    clock = payment.expires_at + 120000 + 1;
     await service.handleTransactions([]);
 
     expect(expiredEvents).toHaveLength(0);

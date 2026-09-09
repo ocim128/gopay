@@ -129,6 +129,13 @@ CREATE TABLE IF NOT EXISTS config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
  * @type {ReadonlyArray<{ table: string, column: string, definition: string }>}
  */
 const COLUMN_ADDITIONS = Object.freeze([
+  { table: 'payments', column: 'request_hash', definition: 'TEXT' },
+  { table: 'payments', column: 'notification_state', definition: 'TEXT' },
+  { table: 'payments', column: 'notification_attempts', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'payments', column: 'notification_next_at', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'payments', column: 'notification_lease', definition: 'TEXT' },
+  { table: 'payments', column: 'notification_lease_until', definition: 'INTEGER' },
+  { table: 'payments', column: 'notification_request', definition: 'TEXT' },
   // Webhook delivery logs gained the response/request capture columns so the
   // Panel can show what was sent and what came back for each attempt.
   { table: 'webhook_delivery_logs', column: 'response_status', definition: 'INTEGER' },
@@ -212,6 +219,7 @@ export function runMigrations(db) {
   const apply = db.transaction(() => {
     db.exec(SCHEMA_SQL);
     applyColumnAdditions(db);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_notification_due ON payments(notification_state, notification_next_at, notification_lease_until)');
     dropColumnsIfExist(db, 'admin_users', ['failed_attempts', 'lockout_until']);
   });
   apply();

@@ -35,6 +35,7 @@ const EXPECTED_RESPONSE_KEYS = [
   'created_at_iso',
   'expires_at',
   'expires_at_iso',
+  'reconcile_until',
   'id',
   'qris_string',
   'qris_url',

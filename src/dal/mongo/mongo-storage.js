@@ -182,6 +182,13 @@ function toPayment(doc) {
     paid_at: doc.paid_at ?? null,
     tx_raw: doc.tx_raw ?? null,
     tz: doc.tz ?? null,
+    request_hash: doc.request_hash ?? null,
+    notification_state: doc.notification_state ?? null,
+    notification_attempts: doc.notification_attempts ?? 0,
+    notification_next_at: doc.notification_next_at ?? 0,
+    notification_lease: doc.notification_lease ?? null,
+    notification_lease_until: doc.notification_lease_until ?? null,
+    notification_request: doc.notification_request ?? null,
   };
 }
 
@@ -277,6 +284,8 @@ function toWebhookLogRow(doc) {
  */
 async function createIndexes(db) {
   const payments = db.collection('payments');
+  await payments.createIndex({ notification_state: 1, notification_next_at: 1, notification_lease_until: 1 },
+    { name: 'idx_notification_due' });
 
   // Pending-amount allocation: unique amount among pending rows. Also backs the
   // candidate amount range scan (the same index serves both because it is
@@ -377,8 +386,7 @@ export function applyFailurePolicy(state, policy) {
   const withinOpenWindow =
     prevUntil !== null &&
     now < prevUntil &&
-    prevAttempts > 0 &&
-    prevAttempts < threshold;
+    prevAttempts > 0;
 
   let failedAttempts;
   let windowEnd;
@@ -485,12 +493,18 @@ export async function createMongoStorage(options) {
       // tx_id / paid_* are absent while pending so the partial unique index on
       // tx_id excludes this row.
       tz: payment.tz ?? null,
+      request_hash: payment.request_hash ?? null,
       // terminal_at is absent while pending (sparse history index excludes it).
     };
     try {
       await paymentsCol.insertOne(doc);
     } catch (err) {
       if (isDuplicateKeyError(err)) {
+        if (payment.request_hash) {
+          const existing = await paymentsCol.findOne({ _id: payment.id });
+          if (existing) return existing.request_hash === payment.request_hash
+            ? { ok: true, value: toPayment(existing) } : { ok: false, code: 'IDEMPOTENCY_CONFLICT' };
+        }
         // The only unique index a fresh pending row can trip is
         // `uniq_pending_amount` (the automatic `_id` index would only trip on a
         // duplicate id, which is a caller bug — surface as AMOUNT_IN_USE for the
@@ -600,6 +614,7 @@ export async function createMongoStorage(options) {
         {
           $set: {
             status: 'paid',
+            notification_state: 'pending', notification_attempts: 0, notification_next_at: 0,
             tx_id: settlement.txId,
             paid_amount: settlement.paidAmount,
             paid_at: settlement.paidAt,
@@ -647,6 +662,7 @@ export async function createMongoStorage(options) {
         {
           $set: {
             status: 'expired',
+            notification_state: 'pending', notification_attempts: 0, notification_next_at: 0,
             // terminal_at = created_at for expired payments, so the history
             // index surfaces them by creation time (matching SQLite's COALESCE
             // fallback to created_at).
@@ -683,6 +699,7 @@ export async function createMongoStorage(options) {
           {
             $set: {
               status: 'expired',
+              notification_state: 'pending', notification_attempts: 0, notification_next_at: 0,
               // Use an aggregation pipeline so terminal_at can copy created_at.
               terminal_at: '$created_at',
             },
@@ -1068,7 +1085,6 @@ export async function createMongoStorage(options) {
                     { $ne: ['$prev_until', null] },
                     { $lt: [now, '$prev_until'] },
                     { $gt: ['$prev_attempts', 0] },
-                    { $lt: ['$prev_attempts', threshold] },
                   ],
                 },
                 true,
@@ -1205,7 +1221,29 @@ export async function createMongoStorage(options) {
 
   // ---- assemble the Storage object -----------------------------------------
 
+  const notifications = {
+    async claim(now, leaseUntil, token) {
+      return toPayment(await paymentsCol.findOneAndUpdate({
+        notification_state: 'pending', notification_next_at: { $lte: now },
+        $or: [{ notification_lease_until: null }, { notification_lease_until: { $lte: now } }],
+      }, { $set: { notification_lease: token, notification_lease_until: leaseUntil } },
+      { sort: { notification_next_at: 1, _id: 1 }, returnDocument: 'after' }));
+    },
+    async saveRequest(id, token, request) {
+      const result = await paymentsCol.updateOne({ _id: id, notification_lease: token },
+        { $set: { notification_request: request } });
+      return result.matchedCount > 0;
+    },
+    async finish(id, token, { state, attempts, nextAt }) {
+      const result = await paymentsCol.updateOne({ _id: id, notification_lease: token },
+        { $set: { notification_state: state, notification_attempts: attempts, notification_next_at: nextAt },
+          $unset: { notification_lease: '', notification_lease_until: '' } });
+      return result.matchedCount > 0;
+    },
+  };
+
   return {
+    notifications,
     payments: {
       insertPending,
       getById,
@@ -1217,6 +1255,7 @@ export async function createMongoStorage(options) {
       expireOverdue,
       expireOverdueReturning,
       countActive,
+      oldestActiveCreation: async () => (await paymentsCol.findOne({ status: 'pending' }, { sort: { created_at: 1 }, projection: { created_at: 1 } }))?.created_at ?? null,
       findCandidatesByAmount,
       maxActiveTolerance,
     },

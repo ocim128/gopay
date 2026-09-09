@@ -24,7 +24,8 @@
 // (`src/errors.js`) so the route layer can translate them into the correct HTTP
 // status without knowing about this module.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { RECONCILIATION_GRACE_MS } from './policy.js';
 
 import { getErrorDefinition } from '../errors.js';
 import {
@@ -62,15 +63,15 @@ export const DEFAULT_TIMEOUT_MS = 300000;
 export const DEFAULT_TOLERANCE = 0;
 
 /**
- * Allow a small clock difference between GoBiz and this service, but never
- * settle a payment with a transaction recorded materially before payment
+ * Do not allow backward clock skew: never
+ * settle a payment with a transaction recorded before payment
  * creation. Without this lower bound, a service restart can forget which
  * historical transactions it has already seen and reuse one for a new QRIS
  * payment with the same amount.
  *
  * @type {number}
  */
-export const TRANSACTION_TIME_SKEW_MS = 2 * 60 * 1000;
+export const TRANSACTION_TIME_SKEW_MS = 0;
 
 /**
  * Parse the canonical transaction timestamp used for settlement matching.
@@ -186,7 +187,8 @@ export function createPaymentService(deps = {}) {
    */
   function buildPendingRecord(amount, ctx) {
     return {
-      id: idFactory(),
+      id: ctx.id ?? idFactory(),
+      request_hash: ctx.requestHash ?? null,
       amount,
       qris_string: buildDynamicQris(ctx.staticQris, amount),
       qris_url: null,
@@ -241,8 +243,28 @@ export function createPaymentService(deps = {}) {
     const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS;
     const tolerance = input.tolerance ?? DEFAULT_TOLERANCE;
     const webhookUrl = input.webhook_url ?? null;
+    // The primary key is also the cross-process idempotency lock.
+    const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const id = input.idempotency_key ? digest([input.client_id, input.idempotency_key]) : null;
+    const requestHash = id ? digest([mode, mode === PAYMENT_MODE.CLIENT ? input.amount : input.base_amount,
+      timeout, tolerance, webhookUrl, input.tz ?? null]) : null;
+    if (id) {
+      const existing = await storage.payments.getById(id);
+      if (existing) {
+        if (existing.request_hash !== requestHash) throw new PaymentError('IDEMPOTENCY_CONFLICT');
+        return existing;
+      }
+    }
+    await expireAndNotify(now());
+    let staticQris = await config.getStaticQris();
+    if (!staticQris && typeof deps.ensureReady === 'function') {
+      try { await deps.ensureReady(); }
+      catch { throw new PaymentError('PROVIDER_UNAVAILABLE'); }
+      staticQris = await config.getStaticQris();
+    }
     const createdAt = now();
     const ctx = {
+      id, requestHash,
       createdAt,
       // expires_at is exactly created_at + timeout.
       expiresAt: createdAt + timeout,
@@ -255,7 +277,7 @@ export function createPaymentService(deps = {}) {
       tz: input.tz ?? null,
       // Read the Static_QRIS once; the QRIS_Builder validates it per build.
       // The config service reads through the (async) DAL, so this is awaited.
-      staticQris: await config.getStaticQris(),
+      staticQris,
     };
 
     /** @type {import('../dal/storage-interface.js').Payment} */
@@ -269,7 +291,7 @@ export function createPaymentService(deps = {}) {
         if (result.code === 'AMOUNT_IN_USE') {
           throw new PaymentError('AMOUNT_IN_USE');
         }
-        throw new PaymentError('INVALID_REQUEST', result.error ?? 'Failed to create the payment.');
+        throw new PaymentError(result.code === 'IDEMPOTENCY_CONFLICT' ? result.code : 'INVALID_REQUEST', result.error);
       }
       stored = result.value;
     } else {
@@ -288,7 +310,7 @@ export function createPaymentService(deps = {}) {
         if (result.code === 'AMOUNT_IN_USE') {
           return false;
         }
-        throw new PaymentError('INVALID_REQUEST', result.error ?? 'Failed to create the payment.');
+        throw new PaymentError(result.code === 'IDEMPOTENCY_CONFLICT' ? result.code : 'INVALID_REQUEST', result.error);
       });
       stored = allocation.result;
     }
@@ -444,7 +466,7 @@ export function createPaymentService(deps = {}) {
    */
   async function expireAndNotify(at) {
     if (typeof storage.payments.expireOverdueReturning === 'function') {
-      const expired = await storage.payments.expireOverdueReturning(at);
+      const expired = await storage.payments.expireOverdueReturning(at - RECONCILIATION_GRACE_MS);
       if (Array.isArray(expired) && expired.length > 0) {
         for (const payment of expired) {
           notifyExpired(payment);
@@ -453,7 +475,7 @@ export function createPaymentService(deps = {}) {
       }
       return 0;
     }
-    return storage.payments.expireOverdue(at);
+    return storage.payments.expireOverdue(at - RECONCILIATION_GRACE_MS);
   }
 
   /**
@@ -523,7 +545,7 @@ export function createPaymentService(deps = {}) {
       if (!tx || tx.type !== 'payin' || typeof tx.txId !== 'string' || tx.txId.length === 0) {
         continue;
       }
-      if (!Number.isFinite(tx.amount)) {
+      if (!Number.isSafeInteger(tx.amount) || tx.amount <= 0) {
         continue;
       }
 
@@ -547,7 +569,7 @@ export function createPaymentService(deps = {}) {
             (p) =>
               !consumed.has(p.id) &&
               Math.abs(tx.amount - p.amount) <= p.tolerance &&
-              transactionAt >= p.created_at - TRANSACTION_TIME_SKEW_MS,
+               transactionAt >= p.created_at && transactionAt <= p.expires_at && transactionAt <= at,
           )
           .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       } else {
@@ -559,7 +581,7 @@ export function createPaymentService(deps = {}) {
           (p) =>
             !consumed.has(p.id) &&
             Math.abs(tx.amount - p.amount) <= p.tolerance &&
-            transactionAt >= p.created_at - TRANSACTION_TIME_SKEW_MS,
+             transactionAt >= p.created_at && transactionAt <= p.expires_at && transactionAt <= at,
         );
         // The DAL already returns rows ordered by (created_at ASC, id ASC), so
         // the tie-break is stable without an additional sort.

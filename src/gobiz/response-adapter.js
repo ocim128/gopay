@@ -70,10 +70,13 @@ function toIso(time) {
  * @returns {{ txId: string|null, amount: number, type: 'payin', time: string|null, raw: object }}
  */
 function toTransaction(tx, raw) {
+  const status = String(tx?.status ?? '').toLowerCase();
+  const paymentType = String(tx?.payment_type ?? '').toLowerCase();
   return {
     txId: selectTxId(tx),
     amount: toRupiah(tx?.gross_amount),
-    type: 'payin',
+    type: ['settlement', 'capture'].includes(status) && paymentType === 'qris'
+      ? 'payin' : 'ignored',
     time: toIso(tx?.transaction_time),
     raw,
   };
@@ -121,6 +124,7 @@ export function parseAnalyticsTx(raw) {
   }
   const result = transactions.map((tx) => toTransaction(tx, tx));
   result.total = raw?.total ?? 0;
+  result.pageCount = transactions.length;
   return result;
 }
 
@@ -148,6 +152,7 @@ export function parseJournalTx(raw) {
     transactions.push(toTransaction(tx, item));
   }
   transactions.total = raw?.total ?? 0;
+  transactions.pageCount = items.length;
   return transactions;
 }
 

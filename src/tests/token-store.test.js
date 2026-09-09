@@ -51,7 +51,7 @@ describe('TokenStore (encrypted, MASTER_KEY set)', () => {
     expect(payload.data).toBeTypeOf('string');
   });
 
-  it('writes the token file with 0600 permissions', () => {
+  it.skipIf(process.platform === 'win32')('writes the token file with 0600 permissions', () => {
     const store = new TokenStore({ filePath, masterKey: 'super-secret-key', logger });
     store.save('access-token-123');
     const mode = fs.statSync(filePath).mode & 0o777;
@@ -119,7 +119,7 @@ describe('TokenStore (plaintext fallback, no MASTER_KEY)', () => {
     expect(payload.data).toBe('access-token-456');
   });
 
-  it('writes the plaintext file with 0600 permissions', () => {
+  it.skipIf(process.platform === 'win32')('writes the plaintext file with 0600 permissions', () => {
     const store = new TokenStore({ filePath, masterKey: null, logger });
     store.save('access-token-123');
     const mode = fs.statSync(filePath).mode & 0o777;

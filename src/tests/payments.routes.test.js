@@ -153,6 +153,7 @@ describe('POST /payment', () => {
         'created_at_iso',
         'expires_at',
         'expires_at_iso',
+        'reconcile_until',
         'id',
         'qris_string',
         'qris_url',
@@ -302,7 +303,7 @@ describe('GET /payment/:id', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(Object.keys(body).sort()).toEqual(
-      ['amount', 'created_at', 'created_at_iso', 'expires_at', 'expires_at_iso', 'id', 'status', 'tz'].sort(),
+      ['amount', 'created_at', 'created_at_iso', 'expires_at', 'expires_at_iso', 'reconcile_until', 'id', 'status', 'tz'].sort(),
     );
     expect(body.status).toBe('pending');
     expect(body.tz).toBe('Asia/Jakarta');

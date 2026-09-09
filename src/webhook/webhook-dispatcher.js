@@ -146,7 +146,7 @@ export function buildPayload(payment, event = PAID_EVENT, tz = DISPLAY_TIMEZONE)
 
   const rawObject = parseRawTransaction(payment?.tx_raw);
   if (rawObject !== null) {
-    payload.provider_transaction = rawObject;
+    payload.provider_transaction = rawObject.metadata?.transaction ?? rawObject;
   }
   
   return payload;
@@ -253,6 +253,13 @@ export function createWebhookDispatcher(deps) {
     now = Date.now,
     generateId = randomUUID,
   } = deps ?? {};
+
+  // Delivery obligations live in the payment outbox. A diagnostic log failure
+  // must not turn a retriable delivery into a silently abandoned notification.
+  async function appendLog(entry) {
+    try { await webhookLogs.append(entry); }
+    catch (err) { console.error('[WebhookDispatcher] Delivery log write failed:', err.message); }
+  }
 
   if (!webhookLogs || typeof webhookLogs.append !== 'function') {
     throw new Error('createWebhookDispatcher requires a webhookLogs store with append().');
@@ -376,7 +383,7 @@ export function createWebhookDispatcher(deps) {
       lastStatus = result.status;
 
       if (result.ok) {
-        await webhookLogs.append({
+        await appendLog({
           id: generateId(),
           payment_id: payment.id,
           target_url: url,
@@ -395,7 +402,7 @@ export function createWebhookDispatcher(deps) {
       const logId = generateId();
       const lastError =
         result.error ?? `Non-2xx response status ${result.status ?? 'unknown'}`;
-      await webhookLogs.append({
+      await appendLog({
         id: logId,
         payment_id: payment.id,
         target_url: url,
@@ -411,7 +418,8 @@ export function createWebhookDispatcher(deps) {
       if (attempt === MAX_ATTEMPTS) {
         // All attempts exhausted: mark the final row permanently failed and
         // stop retrying.
-        await webhookLogs.markPermanentFailure(logId);
+        try { await webhookLogs.markPermanentFailure(logId); }
+        catch (err) { console.error('[WebhookDispatcher] Failure log write failed:', err.message); }
         return {
           sent: true,
           success: false,
@@ -450,7 +458,7 @@ export function createWebhookDispatcher(deps) {
    */
   async function dispatchOnce(payment, options = {}) {
     const event = options.event ?? PAID_EVENT;
-    const prepared = await prepareRequest(payment, event);
+    const prepared = options.prepared ?? await prepareRequest(payment, event);
     if (prepared === null) {
       // No per-Payment URL and no Config default: do not send, not a failure,
       // and write no delivery log.
@@ -461,12 +469,12 @@ export function createWebhookDispatcher(deps) {
     const result = await attemptDelivery(url, headers, body);
     const timestamp = now();
 
-    await webhookLogs.append({
+    await appendLog({
       id: generateId(),
       payment_id: payment.id,
       target_url: url,
       status: result.ok ? 'success' : 'failed',
-      attempts: 1,
+      attempts: options.attempt ?? 1,
       last_attempt_at: timestamp,
       last_error: result.ok
         ? null
@@ -485,7 +493,7 @@ export function createWebhookDispatcher(deps) {
     };
   }
 
-  return { dispatch, dispatchOnce };
+  return { dispatch, dispatchOnce, prepareRequest };
 }
 
 export default createWebhookDispatcher;

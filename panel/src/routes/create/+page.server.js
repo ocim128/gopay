@@ -24,7 +24,7 @@ function parsePositiveInteger(raw) {
     return { ok: false };
   }
   const value = Number(text);
-  if (!Number.isSafeInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1000 || value > 9999000) {
     return { ok: false };
   }
   return { ok: true, value };
@@ -89,7 +89,7 @@ export const actions = {
       const amount = parsePositiveInteger(form.get('amount'));
       if (!amount.ok) {
         return fail(400, {
-          message: 'Amount must be a whole number of at least 1 Rupiah.',
+          message: 'Amount must be a whole number between 1000 and 9999000 Rupiah.',
           values
         });
       }
@@ -98,7 +98,7 @@ export const actions = {
       const baseAmount = parsePositiveInteger(form.get('base_amount'));
       if (!baseAmount.ok) {
         return fail(400, {
-          message: 'Base amount must be a whole number of at least 1 Rupiah.',
+          message: 'Base amount must be a whole number between 1000 and 9999000 Rupiah.',
           values
         });
       }

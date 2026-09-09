@@ -127,7 +127,7 @@ describe('Property 15: Settlement tie-break — earliest created', () => {
           // Settle after every created_at but well within every lifetime.
           clock = base + 100;
           const settled = await service.handleTransactions([
-            { txId, amount: centre, type: 'payin', time: '2024-01-01T00:00:00.000Z', raw: {} },
+            { txId, amount: centre, type: 'payin', time: new Date(clock).toISOString(), raw: {} },
           ]);
 
           // Exactly one Payment is settled, and it is the earliest-created one.

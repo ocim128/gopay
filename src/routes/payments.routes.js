@@ -37,13 +37,14 @@ import { createApiKeyAuthPreHandler } from '../auth/api-key-auth.js';
 import { generateQrisImage as defaultGenerateQrisImage } from '../payment/qris-builder.js';
 import { paymentRouteSchemas, getPaymentParamsSchema, WEBHOOK_URL_MAX_LENGTH } from './schemas.js';
 import { isValidTimezone, toZonedIso, DISPLAY_TIMEZONE } from '../time.js';
+import { reconciliationDeadline } from '../payment/policy.js';
 
 function parseProviderTransaction(value) {
   if (typeof value !== 'string' || value.length === 0) return null;
   try {
     const parsed = JSON.parse(value);
     return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed
+      ? (parsed.metadata?.transaction ?? parsed)
       : null;
   } catch {
     return null;
@@ -255,7 +256,14 @@ export default async function paymentsRoutes(fastify, opts = {}) {
     }
 
     const mode = resolveMode(body);
+    const idempotencyKey = request.headers['idempotency-key'];
+    if (idempotencyKey !== undefined &&
+        (typeof idempotencyKey !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(idempotencyKey))) {
+      return reply.code(400).send(buildHttpError('INVALID_REQUEST').body);
+    }
     const input = {
+      idempotency_key: idempotencyKey,
+      client_id: request.apiKey?.id ?? request.apiKey?.key_hash,
       mode,
       amount: body.amount,
       base_amount: body.base_amount,
@@ -284,6 +292,7 @@ export default async function paymentsRoutes(fastify, opts = {}) {
       // the resolved display timezone, so consumers can use whichever
       // representation they prefer.
       expires_at: payment.expires_at,
+      reconcile_until: reconciliationDeadline(payment),
       created_at: payment.created_at,
       expires_at_iso: toZonedIso(payment.expires_at, tz),
       created_at_iso: toZonedIso(payment.created_at, tz),
@@ -310,6 +319,7 @@ export default async function paymentsRoutes(fastify, opts = {}) {
       amount: payment.amount,
       status: payment.status,
       expires_at: payment.expires_at,
+      reconcile_until: reconciliationDeadline(payment),
       created_at: payment.created_at,
       expires_at_iso: toZonedIso(payment.expires_at, tz),
       created_at_iso: toZonedIso(payment.created_at, tz),

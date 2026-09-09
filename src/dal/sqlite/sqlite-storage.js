@@ -164,8 +164,7 @@ function applyFailurePolicy(state, policy) {
   const withinOpenWindow =
     prevUntil !== null &&
     now < prevUntil &&
-    prevAttempts > 0 &&
-    prevAttempts < threshold;
+    prevAttempts > 0;
 
   let failedAttempts;
   let windowEnd;
@@ -212,10 +211,10 @@ export function createSqliteStorage(options) {
   const insertPaymentStmt = db.prepare(
     `INSERT INTO payments
        (id, amount, status, qris_string, qris_url, created_at, expires_at,
-        timeout, tolerance, webhook_url, tx_id, paid_amount, paid_at, tz)
+        timeout, tolerance, webhook_url, tx_id, paid_amount, paid_at, tz, request_hash)
      VALUES
        (@id, @amount, 'pending', @qris_string, @qris_url, @created_at, @expires_at,
-        @timeout, @tolerance, @webhook_url, NULL, NULL, NULL, @tz)`,
+        @timeout, @tolerance, @webhook_url, NULL, NULL, NULL, @tz, @request_hash)`,
   );
 
   const getPaymentByIdStmt = db.prepare('SELECT * FROM payments WHERE id = ?');
@@ -241,19 +240,19 @@ export function createSqliteStorage(options) {
   const markPaidStmt = db.prepare(
     `UPDATE payments
        SET status = 'paid', tx_id = @txId, paid_amount = @paidAmount, paid_at = @paidAt,
-           tx_raw = @raw
+           tx_raw = @raw, notification_state = 'pending'
      WHERE id = @id AND status = 'pending'`,
   );
 
   const expireOverdueStmt = db.prepare(
     `UPDATE payments
-       SET status = 'expired'
+       SET status = 'expired', notification_state = 'pending'
      WHERE status = 'pending' AND expires_at < ?`,
   );
 
   const expireOverdueReturningStmt = db.prepare(
     `UPDATE payments
-       SET status = 'expired'
+       SET status = 'expired', notification_state = 'pending'
      WHERE status = 'pending' AND expires_at < ?
      RETURNING *`,
   );
@@ -420,11 +419,17 @@ export function createSqliteStorage(options) {
       tolerance: payment.tolerance ?? 0,
       webhook_url: payment.webhook_url ?? null,
       tz: payment.tz ?? null,
+      request_hash: payment.request_hash ?? null,
     };
 
     try {
       insertPaymentStmt.run(params);
     } catch (err) {
+      if (payment.request_hash) {
+        const existing = getByIdSync(payment.id);
+        if (existing) return existing.request_hash === payment.request_hash
+          ? { ok: true, value: existing } : { ok: false, code: 'IDEMPOTENCY_CONFLICT' };
+      }
       if (isUniqueViolation(err)) {
         return { ok: false, code: 'AMOUNT_IN_USE' };
       }
@@ -1120,7 +1125,26 @@ export function createSqliteStorage(options) {
     clearAll: loginAttemptsClearAll,
   };
 
+  const notifications = {
+    async claim(now, leaseUntil, token) {
+      return db.prepare(`UPDATE payments SET notification_lease = ?, notification_lease_until = ?
+        WHERE id = (SELECT id FROM payments WHERE notification_state = 'pending'
+          AND notification_next_at <= ? AND COALESCE(notification_lease_until, 0) <= ?
+          ORDER BY notification_next_at, id LIMIT 1) RETURNING *`).get(token, leaseUntil, now, now) ?? null;
+    },
+    async saveRequest(id, token, request) {
+      return db.prepare('UPDATE payments SET notification_request = ? WHERE id = ? AND notification_lease = ?')
+        .run(request, id, token).changes > 0;
+    },
+    async finish(id, token, { state, attempts, nextAt }) {
+      return db.prepare(`UPDATE payments SET notification_state = ?, notification_attempts = ?,
+        notification_next_at = ?, notification_lease = NULL, notification_lease_until = NULL
+        WHERE id = ? AND notification_lease = ?`).run(state, attempts, nextAt, id, token).changes > 0;
+    },
+  };
+
   return {
+    notifications,
     payments: {
       insertPending,
       getById,
@@ -1132,6 +1156,7 @@ export function createSqliteStorage(options) {
       expireOverdue,
       expireOverdueReturning,
       countActive,
+      oldestActiveCreation: async () => db.prepare("SELECT MIN(created_at) AS oldest FROM payments WHERE status = 'pending'").get().oldest,
       findCandidatesByAmount,
       maxActiveTolerance,
     },

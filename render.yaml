@@ -34,7 +34,8 @@ services:
     # flag needs >=20.6. Render's `nodeVersion` accepts a major ("20") or a
     # major.minor; pin the major here and let Render's 20.x track satisfy it.
     nodeVersion: "20.19.0"
-    plan: free
+    # Continuous polling and webhook recovery require an always-on instance.
+    plan: starter
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /health/ready

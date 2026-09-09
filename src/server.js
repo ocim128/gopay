@@ -40,6 +40,7 @@ import { createTokenStore } from './gobiz/token-store.js';
 import { createAuthTokenManager } from './gobiz/auth-token-manager.js';
 import { createGoBizClient } from './gobiz/gobiz-client.js';
 import { createWebhookDispatcher } from './webhook/webhook-dispatcher.js';
+import { createNotificationWorker } from './webhook/notification-worker.js';
 import { createPaymentService } from './payment/payment-service.js';
 import { createSharedPoller } from './poller/shared-poller.js';
 import { createEventBus } from './events/event-bus.js';
@@ -288,6 +289,8 @@ export async function buildServer(options = {}) {
   // 4b) Realtime event bus (in-process pub/sub) for the panel's SSE stream.
   //     Publishing is fire-and-forget and never blocks the settlement pipeline.
   const events = options.events ?? createEventBus();
+  const notificationWorker = storage.notifications && typeof webhookDispatcher.prepareRequest === 'function'
+    ? createNotificationWorker({ storage, dispatcher: webhookDispatcher }) : null;
 
   // 5) + 6) Payment_Service and Shared_Poller form a cycle (each references the
   //    other). Resolve it with a deferred `poller` reference.
@@ -299,6 +302,7 @@ export async function buildServer(options = {}) {
     createPaymentService({
       storage,
       config,
+      ensureReady: () => gobizClient.init(),
       ensureRunning: () => {
         // `ensureRunning` now returns a Promise (the active-count read is
         // async). The Payment_Service calls this hook fire-and-forget, so the
@@ -312,11 +316,11 @@ export async function buildServer(options = {}) {
       },
       onSettled: (payment) => {
         events.emitPayment('paid', payment);
-        return webhookDispatcher.dispatch(payment, { event: 'paid' });
+        return notificationWorker ? notificationWorker.wake() : webhookDispatcher.dispatch(payment, { event: 'paid' });
       },
       onExpired: (payment) => {
         events.emitPayment('expired', payment);
-        return webhookDispatcher.dispatch(payment, { event: 'expired' });
+        return notificationWorker ? notificationWorker.wake() : webhookDispatcher.dispatch(payment, { event: 'expired' });
       },
       onCreated: (payment) => events.emitPayment('created', payment),
     });
@@ -324,6 +328,7 @@ export async function buildServer(options = {}) {
   if (!poller) {
     poller = createSharedPoller(gobizClient, {
       getActiveCount: () => storage.payments.countActive(),
+      getStartTime: () => storage.payments.oldestActiveCreation?.() ?? null,
       onTransactions: (transactions) => paymentService.handleTransactions(transactions),
       getPollInterval: () => config.getPollInterval(),
       // Fire the first poll right after a payment is created instead of waiting
@@ -411,7 +416,15 @@ export async function buildServer(options = {}) {
       return { ok: true };
     }
     try {
-      await withTimeout(storage.ping(), HEALTH_PING_TIMEOUT_MS);
+      const [, qris] = await withTimeout(Promise.all([storage.ping(), config.getStaticQris()]), HEALTH_PING_TIMEOUT_MS);
+      if (!qris) {
+        // A failed initial warm-up must be retried even while Render keeps
+        // customer traffic away from this not-yet-ready instance.
+        if (typeof gobizClient.init === 'function') {
+          Promise.resolve(gobizClient.init()).catch((err) => app.log.warn({ err }, 'GoBiz warm-up failed'));
+        }
+        return { ok: false };
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -460,14 +473,16 @@ export async function buildServer(options = {}) {
     if (poller && typeof poller.stop === 'function') {
       // `stop()` is async: it drains any in-flight reschedule so a concurrent
       // schedule cannot resurrect a timer after shutdown.
-      await poller.stop();
+      await (typeof poller.drain === 'function' ? poller.drain() : poller.stop());
     }
+    await notificationWorker?.stop();
     if (ownsStorage && typeof storage.close === 'function') {
       await storage.close();
     }
   });
 
   if (options.startPoller && poller && typeof poller.ensureRunning === 'function') {
+    notificationWorker?.start();
     await poller.ensureRunning();
   }
 

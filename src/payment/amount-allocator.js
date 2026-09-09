@@ -97,7 +97,7 @@ export function isValidBaseAmount(baseAmount) {
   return (
     typeof baseAmount === 'number' &&
     Number.isInteger(baseAmount) &&
-    baseAmount >= MIN_AMOUNT
+    baseAmount >= MIN_AMOUNT && baseAmount <= MAX_AMOUNT
   );
 }
 
