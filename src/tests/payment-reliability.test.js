@@ -197,6 +197,20 @@ it('accepts successful QRIS but excludes card transactions', () => {
   expect(parseAnalyticsTx({ transactions: [{ ...raw, payment_type: 'credit_card' }] })[0].type).toBe('ignored');
 });
 
+it('accepts the GoBiz analytics transaction_status field', () => {
+  const raw = {
+    id: 'live-shape',
+    transaction_status: 'SETTLEMENT',
+    payment_type: 'QRIS',
+    gross_amount: 4100000,
+    transaction_time: new Date(START).toISOString(),
+    currency: 'IDR',
+  };
+  expect(parseAnalyticsTx({ transactions: [raw] })[0]).toMatchObject({
+    txId: 'live-shape', amount: 41000, type: 'payin',
+  });
+});
+
 it('times out while a real HTTP response body is stalled', async () => {
   let headersSent = false;
   const server = createServer((_req, res) => {

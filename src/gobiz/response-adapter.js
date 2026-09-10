@@ -70,7 +70,10 @@ function toIso(time) {
  * @returns {{ txId: string|null, amount: number, type: 'payin', time: string|null, raw: object }}
  */
 function toTransaction(tx, raw) {
-  const status = String(tx?.status ?? '').toLowerCase();
+  // Analytics responses use `transaction_status`; some older fixtures and
+  // journal providers expose the shorter `status`. Accept both spellings so a
+  // real settlement is not silently downgraded to an ignored transaction.
+  const status = String(tx?.status ?? tx?.transaction_status ?? '').toLowerCase();
   const paymentType = String(tx?.payment_type ?? '').toLowerCase();
   return {
     txId: selectTxId(tx),
